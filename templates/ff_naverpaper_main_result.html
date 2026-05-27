@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+
+{{ macros.m_button_group([['refresh_btn', '새로고침']]) }}
+{{ macros.m_row_start('5') }}
+{{ macros.m_row_end() }}
+
+<div class="card mb-3">
+  <div class="card-header">최근 실행</div>
+  <div class="card-body p-0">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr>
+          <th style="width:8%">ID</th>
+          <th style="width:18%">시작</th>
+          <th style="width:18%">종료</th>
+          <th style="width:9%">계정</th>
+          <th style="width:9%">수집</th>
+          <th style="width:9%">스킵</th>
+          <th style="width:9%">방문</th>
+          <th style="width:9%">포인트</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in arg['runs'] %}
+        <tr>
+          <td>{{ row.id }}</td>
+          <td>{{ row.started_at }}</td>
+          <td>{{ row.finished_at }}</td>
+          <td>{{ row.account_count }}</td>
+          <td>{{ row.collected_url_count }}</td>
+          <td>{{ row.skipped_url_count }}</td>
+          <td>{{ row.visited_url_count }}</td>
+          <td>{{ row.estimated_points }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" class="text-muted text-center p-3">아직 실행 기록이 없습니다.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script type="text/javascript">
+$("body").on('click', '#refresh_btn', function(e) {
+  e.preventDefault();
+  location.reload();
+});
+</script>
+
+{% endblock %}

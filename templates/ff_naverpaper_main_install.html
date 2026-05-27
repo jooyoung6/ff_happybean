@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+{% block content %}
+
+{{ macros.m_button_group([['install_all_btn', '전체 설치'], ['refresh_status_btn', '상태 새로고침']]) }}
+{{ macros.m_row_start('5') }}
+{{ macros.m_row_end() }}
+
+<div class="card mb-3">
+  <div class="card-header">Python 패키지</div>
+  <div class="card-body p-0">
+    <table class="table table-sm table-hover mb-0" id="package_table">
+      <thead>
+        <tr>
+          <th style="width:24%">패키지</th>
+          <th>설치 스펙</th>
+          <th style="width:18%">상태</th>
+          <th style="width:18%">버전</th>
+          <th style="width:14%">작업</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in arg['install_status']['packages'] %}
+        <tr data-key="{{ row.key }}">
+          <td>{{ row.name }}</td>
+          <td><code>{{ row.spec }}</code></td>
+          <td class="dependency-state">
+            {% if row.installed %}<span class="badge badge-success">설치됨</span>{% else %}<span class="badge badge-warning">미설치</span>{% endif %}
+          </td>
+          <td class="dependency-version">{{ row.version }}</td>
+          <td><button class="btn btn-sm btn-outline-primary install-one-btn" data-key="{{ row.key }}">설치</button></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header">Playwright Chromium</div>
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0" id="chromium_table">
+      <tbody>
+        <tr data-key="chromium">
+          <th style="width:24%">브라우저</th>
+          <td>Playwright Chromium</td>
+          <td style="width:18%" class="dependency-state">
+            {% if arg['install_status']['chromium']['installed'] %}<span class="badge badge-success">설치됨</span>{% else %}<span class="badge badge-warning">미설치</span>{% endif %}
+          </td>
+          <td style="width:14%"><button class="btn btn-sm btn-outline-primary install-one-btn" data-key="chromium">설치</button></td>
+        </tr>
+        <tr>
+          <th>설치 명령</th>
+          <td colspan="3"><code>{{ arg['install_status']['chromium']['spec'] }}</code></td>
+        </tr>
+        <tr>
+          <th>경로</th>
+          <td colspan="3" class="chromium-path">{{ arg['install_status']['chromium']['path'] }}</td>
+        </tr>
+        {% if arg['install_status']['chromium']['message'] %}
+        <tr>
+          <th>메시지</th>
+          <td colspan="3" class="text-muted">{{ arg['install_status']['chromium']['message'] }}</td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">설치 작업</div>
+  <div class="card-body p-0">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr>
+          <th style="width:12%">상태</th>
+          <th style="width:20%">대상</th>
+          <th style="width:28%">진행률</th>
+          <th style="width:20%">진행 상태</th>
+          <th style="width:12%">시작</th>
+          <th style="width:8%">단계</th>
+        </tr>
+      </thead>
+      <tbody id="install_job_list">
+        <tr class="empty-row"><td colspan="6" class="text-muted text-center p-3">설치 작업이 없습니다.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card mt-3">
+  <div class="card-header">최근 출력</div>
+  <div class="card-body">
+    <pre id="install_output" class="mb-0" style="white-space: pre-wrap; max-height: 320px; overflow: auto;"></pre>
+  </div>
+</div>
+
+<script type="text/javascript">
+var installSocket = null;
+var installJobs = [];
+
+function badge(installed) {
+  return installed ? '<span class="badge badge-success">설치됨</span>' : '<span class="badge badge-warning">미설치</span>';
+}
+
+function renderStatus(data) {
+  if (!data) return;
+  (data.packages || []).forEach(function(row) {
+    var tr = $('#package_table tr[data-key="' + row.key + '"]');
+    tr.find('.dependency-state').html(badge(row.installed));
+    tr.find('.dependency-version').text(row.version || '');
+  });
+  if (data.chromium) {
+    var ctr = $('#chromium_table tr[data-key="chromium"]');
+    ctr.find('.dependency-state').html(badge(data.chromium.installed));
+    $('.chromium-path').text(data.chromium.path || '');
+  }
+}
+
+function refreshStatus() {
+  globalSendCommand('dependency_status', null, null, null, function(ret) {
+    if (ret.ret === 'success') renderStatus(ret.data);
+  });
+  globalSendCommand('install_jobs', null, null, null, function(ret) {
+    if (Array.isArray(ret)) {
+      ret.forEach(function(row) { upsertJob(row); });
+    }
+  });
+}
+
+function escapeHtml(text) {
+  return $('<div>').text(text || '').html();
+}
+
+function statusClass(status) {
+  if (status === 'COMPLETED') return 'badge badge-success';
+  if (status === 'FAILED') return 'badge badge-danger';
+  if (status === 'RUNNING') return 'badge badge-info';
+  return 'badge badge-secondary';
+}
+
+function makeJobRow(data) {
+  return '<tr id="install_job_' + escapeHtml(data.idx) + '">' + makeJobInner(data) + '</tr>';
+}
+
+function makeJobInner(data) {
+  var percent = parseInt(data.percent || 0);
+  var visible = percent > 0 ? 'visible' : 'hidden';
+  return '<td><span class="' + statusClass(data.status) + '">' + escapeHtml(data.status_kor || data.status) + '</span></td>'
+    + '<td>' + escapeHtml(data.name || data.key || '') + '</td>'
+    + '<td><div class="progress"><div id="install_progress_' + escapeHtml(data.idx) + '" class="progress-bar" style="visibility:' + visible + '; width:' + percent + '%">' + percent + '%</div></div></td>'
+    + '<td id="install_text_' + escapeHtml(data.idx) + '">' + escapeHtml(data.progress_text || '') + '</td>'
+    + '<td>' + escapeHtml(data.start_time || '') + '</td>'
+    + '<td>' + escapeHtml((data.current_step || 0) + '/' + (data.total_steps || 0)) + '</td>';
+}
+
+function upsertJob(data) {
+  if (!data || !data.idx) return;
+  var idx = installJobs.findIndex(function(row) { return row.idx === data.idx; });
+  if (idx >= 0) installJobs[idx] = data;
+  else installJobs.push(data);
+
+  var tr = $('#install_job_' + data.idx);
+  if (tr.length) tr.html(makeJobInner(data));
+  else {
+    if ($('#install_job_list tr.empty-row').length) $('#install_job_list').html('');
+    $('#install_job_list').prepend(makeJobRow(data));
+  }
+  if (data.output) $('#install_output').text(data.output);
+}
+
+$("body").on('click', '#install_all_btn', function(e) {
+  e.preventDefault();
+  $('#install_output').text('전체 설치를 시작합니다...');
+  globalSendCommand('install_all_dependencies', null, null, null, function(ret) {
+    if (ret.ret === 'success' && ret.data) {
+      upsertJob(ret.data);
+      notify(ret.msg || '설치를 시작했습니다.', 'success');
+    } else {
+      notify(ret.msg || '설치 시작 실패', 'warning');
+    }
+  });
+});
+
+$("body").on('click', '.install-one-btn', function(e) {
+  e.preventDefault();
+  var key = $(this).data('key');
+  $('#install_output').text(key + ' 설치를 시작합니다...');
+  globalSendCommand('install_dependency', key, null, null, function(ret) {
+    if (ret.ret === 'success' && ret.data) {
+      upsertJob(ret.data);
+      notify(ret.msg || '설치를 시작했습니다.', 'success');
+    } else {
+      notify(ret.msg || '설치 시작 실패', 'warning');
+    }
+  });
+});
+
+$("body").on('click', '#refresh_status_btn', function(e) {
+  e.preventDefault();
+  refreshStatus();
+});
+
+$(document).ready(function() {
+  installSocket = io.connect(window.location.href);
+
+  installSocket.on('connect', function() {
+    refreshStatus();
+  });
+
+  installSocket.on('dependency_status', function(data) {
+    renderStatus(data);
+  });
+
+  installSocket.on('add', function(data) {
+    upsertJob(data);
+  });
+
+  installSocket.on('status_change', function(data) {
+    upsertJob(data);
+  });
+
+  installSocket.on('status', function(data) {
+    upsertJob(data);
+  });
+
+  installSocket.on('last', function(data) {
+    upsertJob(data);
+    if (data.status === 'COMPLETED') {
+      notify((data.name || '설치') + ' 완료', 'success');
+      refreshStatus();
+    } else if (data.status === 'FAILED') {
+      notify((data.name || '설치') + ' 실패', 'warning');
+    }
+  });
+});
+</script>
+
+{% endblock %}

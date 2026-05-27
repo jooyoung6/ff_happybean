@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block content %}
+
+{{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장'], ['run_now_btn', '지금 실행']]) }}
+{{ macros.m_row_start('5') }}
+{{ macros.m_row_end() }}
+
+<form id="setting" name="setting">
+  <nav>
+    {{ macros.m_tab_head_start() }}
+    {{ macros.m_tab_head('schedule', '스케줄', true) }}
+    {{ macros.m_tab_head('proxy', '프록시', false) }}
+    {{ macros.m_tab_head_end() }}
+  </nav>
+  <div class="tab-content" id="nav-tabContent">
+    {{ macros.m_tab_content_start('schedule', true) }}
+    {{ macros.setting_checkbox('paper_schedule_enabled', '스케줄 실행', value=arg['paper_schedule_enabled']) }}
+    {{ macros.setting_input_text('paper_schedule', '실행 시간', value=arg['paper_schedule'], desc=['크론 형식입니다.', '기본값: 0 3,9,15,21 * * *']) }}
+    {{ macros.setting_checkbox('no_paper_record', '미수집 결과 기록', value=arg['no_paper_record'], desc=['방문할 URL이 없는 계정도 결과 페이지에 기록합니다.']) }}
+    {{ macros.setting_input_text('keep_campaign_days', '캠페인 보관 일수', value=arg['keep_campaign_days']) }}
+    {{ macros.setting_input_text('keep_user_days', '쿠키 DB 보관 일수', value=arg['keep_user_days']) }}
+    {{ macros.info_text('scheduler_active', '스케줄 등록 상태', value=arg['scheduler_active']) }}
+    {{ macros.info_text('is_running', '현재 실행 상태', value=arg['is_running']) }}
+    {{ macros.m_tab_content_end() }}
+
+    {{ macros.m_tab_content_start('proxy', false) }}
+    {{ macros.setting_checkbox('proxy_login_enabled', '로그인에 프록시 사용', value=arg['proxy_login_enabled'], desc=['ON이면 쿠키 갱신, 자동 로그인, 캡챠 로그인 화면을 프록시로 엽니다.']) }}
+    {{ macros.setting_checkbox('proxy_reward_enabled', '적립에 프록시 사용', value=arg['proxy_reward_enabled'], desc=['ON이면 URL 수집과 네이버 캠페인 방문/적립 과정을 프록시로 실행합니다.']) }}
+    {{ macros.setting_input_text('proxy_url', '프록시 주소', value=arg['proxy_url'], desc=['인증이 필요하면 http://user:pass@host:port 형식으로 입력합니다.', '로그인/적립 옵션이 ON인 과정에서만 이 값을 사용합니다.']) }}
+    {{ macros.m_tab_content_end() }}
+
+  </div>
+</form>
+
+<script type="text/javascript">
+var settingTabKey = 'ff_naverpaper:last_setting_tab';
+
+$(document).ajaxSuccess(function(_event, xhr, settings) {
+  if (!settings || !settings.url || settings.url.indexOf('/ajax/setting_save') === -1) return;
+  var ret = xhr.responseJSON;
+  if (!(ret === true || (ret && (ret.ret === 'success' || ret.result === 'success')))) return;
+  globalSendCommand('sync_scheduler', $('#paper_schedule_enabled').is(':checked') ? 'True' : 'False', $('#paper_schedule').val() || '');
+});
+
+$(document).ready(function() {
+  restoreSettingTab();
+  $('a[data-toggle="tab"]').on('shown.bs.tab', function(e) {
+    var href = $(e.target).attr('href') || '';
+    if (href) {
+      try { localStorage.setItem(settingTabKey, href); } catch(err) {}
+    }
+  });
+});
+
+function restoreSettingTab() {
+  try {
+    var href = localStorage.getItem(settingTabKey) || '';
+    if (href && $('a[href="' + href + '"]').length > 0) {
+      $('a[href="' + href + '"]').tab('show');
+    }
+  } catch(e) {}
+}
+
+$("body").on('click', '#run_now_btn', function(e) {
+  e.preventDefault();
+  notify('NaverPaper 실행을 백그라운드로 시작합니다.', 'info');
+  globalSendCommand('run_now', null, null, null, function(ret) {
+    if (ret.ret === 'success') {
+      notify(ret.msg || '백그라운드 실행을 시작했습니다. 결과 페이지에서 완료 기록을 확인하세요.', 'success');
+    } else {
+      notify(ret.msg || '실행 시작 실패', 'warning');
+    }
+  });
+});
+
+</script>
+
+{% endblock %}

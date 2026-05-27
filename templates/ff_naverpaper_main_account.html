@@ -1,0 +1,605 @@
+{% extends "base.html" %}
+{% block content %}
+
+<style>
+.np-page-actions {
+  max-width: 1080px;
+  margin: 0 auto 12px;
+}
+
+.np-profile-block {
+  max-width: 1080px;
+  margin: 0 auto 28px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.np-profile-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.np-profile-layout {
+  display: grid;
+  grid-template-columns: minmax(520px, 660px) 180px;
+  gap: 24px;
+  align-items: start;
+}
+
+.np-profile-form {
+  min-width: 0;
+}
+
+.np-profile-header {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.np-profile-header .np-profile-title {
+  text-align: right;
+}
+
+.np-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.np-field {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.np-field label {
+  margin: 0;
+  text-align: right;
+  font-weight: 700;
+}
+
+.np-field textarea {
+  resize: vertical;
+  font-family: monospace;
+}
+
+.np-help {
+  grid-column: 2;
+  margin-top: 4px;
+  color: #555;
+  font-style: italic;
+}
+
+.np-inline-field input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin-top: 0;
+}
+
+.np-status-row {
+  align-items: start;
+}
+
+.np-cookie-status {
+  min-height: 28px;
+  padding-top: 4px;
+}
+
+.np-preview-panel {
+  min-height: 520px;
+}
+
+.np-login-preview img {
+  width: 170px;
+  max-width: 100%;
+  height: auto;
+  cursor: zoom-in;
+  border: 1px solid #e1e4e8;
+  background: #fff;
+}
+
+.np-image-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: none;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+  padding: 56px 24px 24px;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.np-image-modal.open {
+  display: flex;
+}
+
+.np-image-modal img {
+  width: min(96vw, calc(390px * var(--np-image-zoom, 2)));
+  max-width: none;
+  max-height: none;
+  background: #fff;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+}
+
+.np-image-modal-controls {
+  position: fixed;
+  top: 14px;
+  right: 18px;
+  z-index: 10000;
+  display: flex;
+  gap: 6px;
+}
+
+.np-image-modal-controls button {
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  padding: 5px 10px;
+}
+
+@media (max-width: 900px) {
+  .np-profile-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .np-profile-header,
+  .np-field {
+    grid-template-columns: 120px minmax(0, 1fr);
+  }
+
+  .np-preview-panel {
+    min-height: 0;
+  }
+
+  .np-login-preview img {
+    width: 240px;
+  }
+}
+</style>
+
+<div class="np-page-actions">
+  <button type="button" id="localSettingSaveBtn" class="btn btn-sm btn-outline-primary">설정 저장</button>
+</div>
+
+{% set initial_profiles = arg['profiles'] if arg['profiles'] else [{'user_id':'', 'password':'', 'keep_login': True, 'nid_aut':'', 'nid_ses':'', 'nid_jst':''}] %}
+
+<form id="profile_setting" name="profile_setting">
+  <input type="hidden" id="naver_profiles" name="naver_profiles" value='{{ arg["profiles_json"]|e }}'>
+
+  <div id="profile_blocks">
+    {% for profile in initial_profiles %}
+    <div class="np-profile-block profile-block" data-profile-index="{{ loop.index0 }}" data-original-id="{{ profile['user_id'] }}">
+      <div class="np-profile-layout">
+        <div class="np-profile-form">
+          <div class="np-profile-header">
+            <div class="np-profile-title">프로필 {{ loop.index }}</div>
+            <div class="np-actions">
+              <button type="button" id="profile_add_{{ loop.index0 }}" class="btn btn-sm btn-outline-primary">프로필 추가</button>
+              <button type="button" id="profile_delete_{{ loop.index0 }}" class="btn btn-sm btn-outline-primary">프로필 삭제</button>
+              <button type="button" id="profile_captcha_submit_{{ loop.index0 }}" class="btn btn-sm btn-outline-primary">로그인</button>
+            </div>
+          </div>
+
+          <div class="np-field">
+            <label for="profile_user_id_{{ loop.index0 }}">계정 ID</label>
+            <input id="profile_user_id_{{ loop.index0 }}" class="form-control form-control-sm" value="{{ profile['user_id'] }}">
+          </div>
+
+          <div class="np-field">
+            <label for="profile_password_{{ loop.index0 }}">비밀번호</label>
+            <input id="profile_password_{{ loop.index0 }}" class="form-control form-control-sm" type="password" value="{{ profile['password'] }}">
+          </div>
+
+          <div class="np-field np-inline-field">
+            <label for="profile_keep_login_{{ loop.index0 }}">로그인 상태 유지</label>
+            <input id="profile_keep_login_{{ loop.index0 }}" type="checkbox" {% if profile.get('keep_login', True) %}checked{% endif %}>
+          </div>
+
+          <div class="np-field">
+            <label for="profile_captcha_{{ loop.index0 }}">캡챠</label>
+            <input id="profile_captcha_{{ loop.index0 }}" class="form-control form-control-sm" value="">
+            <div class="np-help">실패시 캡챠 입력이 나옵니다.</div>
+          </div>
+
+          <div class="np-field">
+            <label for="profile_nid_aut_{{ loop.index0 }}">NID_AUT</label>
+            <textarea id="profile_nid_aut_{{ loop.index0 }}" class="form-control" rows="3">{{ profile['nid_aut'] }}</textarea>
+          </div>
+
+          <div class="np-field">
+            <label for="profile_nid_ses_{{ loop.index0 }}">NID_SES</label>
+            <textarea id="profile_nid_ses_{{ loop.index0 }}" class="form-control" rows="3">{{ profile['nid_ses'] }}</textarea>
+          </div>
+
+          <div class="np-field">
+            <label for="profile_nid_jst_{{ loop.index0 }}">NID_JST</label>
+            <textarea id="profile_nid_jst_{{ loop.index0 }}" class="form-control" rows="3">{{ profile['nid_jst'] }}</textarea>
+          </div>
+
+          <div class="np-field np-status-row">
+            <label>쿠키 상태</label>
+            <div id="profile_cookie_status_{{ loop.index0 }}" class="np-cookie-status"></div>
+          </div>
+        </div>
+
+        <div class="np-preview-panel">
+          <div id="profile_login_preview_{{ loop.index0 }}" class="np-login-preview" style="display:none;"></div>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</form>
+
+<div id="profile_prototype" style="display:none;">
+  {% set profile = {'user_id':'', 'password':'', 'keep_login': True, 'nid_aut':'', 'nid_ses':'', 'nid_jst':''} %}
+  {% set idx = '__INDEX__' %}
+  <div class="np-profile-block profile-block" data-profile-index="__INDEX__" data-original-id="">
+    <div class="np-profile-layout">
+      <div class="np-profile-form">
+        <div class="np-profile-header">
+          <div class="np-profile-title">프로필 __PROFILE_NO__</div>
+          <div class="np-actions">
+            <button type="button" id="profile_add_{{ idx }}" class="btn btn-sm btn-outline-primary">프로필 추가</button>
+            <button type="button" id="profile_delete_{{ idx }}" class="btn btn-sm btn-outline-primary">프로필 삭제</button>
+            <button type="button" id="profile_captcha_submit_{{ idx }}" class="btn btn-sm btn-outline-primary">로그인</button>
+          </div>
+        </div>
+
+        <div class="np-field">
+          <label for="profile_user_id_{{ idx }}">계정 ID</label>
+          <input id="profile_user_id_{{ idx }}" class="form-control form-control-sm" value="">
+        </div>
+
+        <div class="np-field">
+          <label for="profile_password_{{ idx }}">비밀번호</label>
+          <input id="profile_password_{{ idx }}" class="form-control form-control-sm" type="password" value="">
+        </div>
+
+        <div class="np-field np-inline-field">
+          <label for="profile_keep_login_{{ idx }}">로그인 상태 유지</label>
+          <input id="profile_keep_login_{{ idx }}" type="checkbox" checked>
+        </div>
+
+        <div class="np-field">
+          <label for="profile_captcha_{{ idx }}">캡챠</label>
+          <input id="profile_captcha_{{ idx }}" class="form-control form-control-sm" value="">
+          <div class="np-help">실패시 캡챠 입력이 나옵니다.</div>
+        </div>
+
+        <div class="np-field">
+          <label for="profile_nid_aut_{{ idx }}">NID_AUT</label>
+          <textarea id="profile_nid_aut_{{ idx }}" class="form-control" rows="3"></textarea>
+        </div>
+
+        <div class="np-field">
+          <label for="profile_nid_ses_{{ idx }}">NID_SES</label>
+          <textarea id="profile_nid_ses_{{ idx }}" class="form-control" rows="3"></textarea>
+        </div>
+
+        <div class="np-field">
+          <label for="profile_nid_jst_{{ idx }}">NID_JST</label>
+          <textarea id="profile_nid_jst_{{ idx }}" class="form-control" rows="3"></textarea>
+        </div>
+
+        <div class="np-field np-status-row">
+          <label>쿠키 상태</label>
+          <div id="profile_cookie_status_{{ idx }}" class="np-cookie-status"></div>
+        </div>
+      </div>
+
+      <div class="np-preview-panel">
+        <div id="profile_login_preview_{{ idx }}" class="np-login-preview" style="display:none;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="np_image_modal" class="np-image-modal" aria-hidden="true">
+  <div class="np-image-modal-controls">
+    <button type="button" id="np_image_zoom_out">-</button>
+    <button type="button" id="np_image_zoom_in">+</button>
+    <button type="button" id="np_image_popup">새 창</button>
+    <button type="button" id="np_image_close">닫기</button>
+  </div>
+  <img id="np_image_modal_img" src="" alt="네이버 로그인 화면 확대">
+</div>
+
+<script type="text/javascript">
+var cookieRows = {{ (arg.get('cookie_statuses') or []) | tojson }};
+var deletedProfileIds = [];
+var nextProfileIndex = {{ initial_profiles|length }};
+var npImageZoom = 2;
+
+function readProfile(index) {
+  return {
+    user_id: String($('#profile_user_id_' + index).val() || '').trim(),
+    password: String($('#profile_password_' + index).val() || '').trim(),
+    keep_login: readToggleState($('#profile_keep_login_' + index)),
+    nid_aut: String($('#profile_nid_aut_' + index).val() || '').trim(),
+    nid_ses: String($('#profile_nid_ses_' + index).val() || '').trim(),
+    nid_jst: String($('#profile_nid_jst_' + index).val() || '').trim()
+  };
+}
+
+function readToggleState($checkbox) {
+  if ($checkbox.is(':checked')) return true;
+  var $toggle = $checkbox.closest('.toggle');
+  if ($toggle.length) return !$toggle.hasClass('off');
+  return false;
+}
+
+function collectProfilesFromDom() {
+  var rows = [];
+  $('#profile_blocks .profile-block').each(function() {
+    var index = $(this).attr('data-profile-index');
+    var profile = readProfile(index);
+    if (profile.user_id || profile.password || profile.nid_aut || profile.nid_ses || profile.nid_jst) {
+      rows.push(profile);
+    }
+  });
+  return rows;
+}
+
+function validateProfiles(rows) {
+  var used = {};
+  for (var i = 0; i < rows.length; i++) {
+    var profile = rows[i];
+    if (!profile.user_id) {
+      notify('계정 ID를 입력하세요.', 'warning');
+      return false;
+    }
+    if (used[profile.user_id]) {
+      notify('계정 ID는 중복될 수 없습니다: ' + profile.user_id, 'warning');
+      return false;
+    }
+    used[profile.user_id] = true;
+  }
+  return true;
+}
+
+function saveProfiles(callback) {
+  var rows = collectProfilesFromDom();
+  if (!validateProfiles(rows)) return;
+  var payload = {profiles: rows, deleted_ids: deletedProfileIds};
+  $('#naver_profiles').val(JSON.stringify(rows));
+  globalSendCommand('profile_save_all', JSON.stringify(payload), null, null, function(ret) {
+    if (ret.ret === 'success') {
+      deletedProfileIds = [];
+      if (ret.data && ret.data.cookie_statuses) {
+        cookieRows = ret.data.cookie_statuses;
+        markOriginalIds();
+        renderCookieStatuses();
+      }
+      notify(ret.msg || '설정을 저장했습니다.', 'success');
+      if (callback) callback(ret);
+    } else {
+      notify(ret.msg || '설정 저장 실패', 'warning');
+    }
+  });
+}
+
+function markOriginalIds() {
+  $('#profile_blocks .profile-block').each(function() {
+    var index = $(this).attr('data-profile-index');
+    var profile = readProfile(index);
+    $(this).attr('data-original-id', profile.user_id || '');
+  });
+}
+
+function cookieRow(userId) {
+  for (var i = 0; i < cookieRows.length; i++) {
+    if (cookieRows[i].user_id === userId) return cookieRows[i];
+  }
+  return null;
+}
+
+function renderCookieStatuses() {
+  $('#profile_blocks .profile-block').each(function() {
+    var index = $(this).attr('data-profile-index');
+    var profile = readProfile(index);
+    var status = cookieRow(profile.user_id);
+    var text = '';
+    if (status) {
+      text = (status.valid ? '정상 - ' : '확인 필요 - ') + (status.message || '');
+      if (status.updated_at) text += ' / DB ' + status.updated_at;
+    } else if (profile.user_id) {
+      text = '미확인';
+    }
+    setFieldValue('profile_cookie_status_' + index, text);
+  });
+}
+
+function setFieldValue(id, value) {
+  var $target = $('#' + id);
+  if (!$target.length) return;
+  if ($target.is('input') || $target.is('textarea') || $target.is('select')) {
+    $target.val(value);
+  } else {
+    $target.text(value);
+  }
+}
+
+function refreshProfileTitles() {
+  $('#profile_blocks .profile-block').each(function(idx) {
+    $(this).find('.np-profile-title').first().text('프로필 ' + (idx + 1));
+  });
+}
+
+function addProfileBlock($after) {
+  var index = nextProfileIndex++;
+  var html = $('#profile_prototype').html()
+    .replace(/__INDEX__/g, String(index))
+    .replace(/__PROFILE_NO__/g, String($('#profile_blocks .profile-block').length + 1));
+  if ($after && $after.length) {
+    $after.after(html);
+  } else {
+    $('#profile_blocks').append(html);
+  }
+  refreshProfileTitles();
+  renderCookieStatuses();
+}
+
+function removeProfileBlock($block) {
+  var originalId = String($block.attr('data-original-id') || '').trim();
+  if (originalId) deletedProfileIds.push(originalId);
+  if ($('#profile_blocks .profile-block').length <= 1) {
+    var index = $block.attr('data-profile-index');
+    $('#profile_user_id_' + index).val('');
+    $('#profile_password_' + index).val('');
+    $('#profile_keep_login_' + index).prop('checked', true).trigger('change');
+    $('#profile_captcha_' + index).val('');
+    $('#profile_nid_aut_' + index).val('');
+    $('#profile_nid_ses_' + index).val('');
+    $('#profile_nid_jst_' + index).val('');
+    showLoginPreview(index, '');
+    $block.attr('data-original-id', '');
+  } else {
+    $block.remove();
+  }
+  refreshProfileTitles();
+  renderCookieStatuses();
+}
+
+function applyCookieResult(index, profile, ret) {
+  var rows = ret.data && ret.data.profiles ? ret.data.profiles : [];
+  cookieRows = ret.data && ret.data.cookie_statuses ? ret.data.cookie_statuses : cookieRows;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].user_id === profile.user_id) {
+      $('#profile_nid_aut_' + index).val(rows[i].nid_aut || '');
+      $('#profile_nid_ses_' + index).val(rows[i].nid_ses || '');
+      $('#profile_nid_jst_' + index).val(rows[i].nid_jst || '');
+      break;
+    }
+  }
+  renderCookieStatuses();
+  markOriginalIds();
+}
+
+function showLoginPreview(index, screenshot) {
+  var $preview = $('#profile_login_preview_' + index);
+  if (!$preview.length) return;
+  if (!screenshot) {
+    $preview.hide().empty();
+    return;
+  }
+  $preview
+    .html('<img src="' + screenshot + '" class="np-login-image" alt="네이버 로그인 화면" data-full-src="' + screenshot + '">')
+    .show();
+}
+
+function submitCaptchaForBlock($block) {
+  var index = $block.attr('data-profile-index');
+  var profile = readProfile(index);
+  var captcha = String($('#profile_captcha_' + index).val() || '').trim();
+  if (!profile.user_id || !profile.password) {
+    notify('계정 ID와 비밀번호를 입력하세요.', 'warning');
+    return;
+  }
+  saveProfiles(function() {
+    notify('로그인을 시작합니다.', 'info');
+    globalSendCommand('profile_submit_captcha', profile.user_id, captcha, null, function(ret) {
+      if (ret.ret === 'success') {
+        applyCookieResult(index, profile, ret);
+        showLoginPreview(index, '');
+        $('#profile_captcha_' + index).val('');
+        notify(ret.msg || '로그인했습니다.', 'success');
+      } else {
+        if (ret.screenshot) {
+          showLoginPreview(index, ret.screenshot);
+        }
+        notify(ret.msg || '로그인에 실패했습니다.', 'warning');
+      }
+    });
+  });
+}
+
+document.addEventListener('click', function(e) {
+  var target = e.target.closest('#localSettingSaveBtn');
+  if (!target) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.stopImmediatePropagation();
+  saveProfiles();
+}, true);
+
+$("body").on('click', '[id^="profile_add_"]', function(e) {
+  e.preventDefault();
+  addProfileBlock($(this).closest('.profile-block'));
+});
+
+$("body").on('click', '[id^="profile_delete_"]', function(e) {
+  e.preventDefault();
+  removeProfileBlock($(this).closest('.profile-block'));
+});
+
+$("body").on('click', '[id^="profile_captcha_submit_"]', function(e) {
+  e.preventDefault();
+  submitCaptchaForBlock($(this).closest('.profile-block'));
+});
+
+$("body").on("click", ".np-login-image", function(e) {
+  e.preventDefault();
+  var src = $(this).attr("data-full-src") || $(this).attr("src");
+  if (!src) return;
+  npImageZoom = 2;
+  $("#np_image_modal").css("--np-image-zoom", npImageZoom);
+  $("#np_image_modal_img").attr("src", src);
+  $("#np_image_modal").addClass("open").attr("aria-hidden", "false");
+});
+
+function closeImageModal() {
+  $("#np_image_modal").removeClass("open").attr("aria-hidden", "true");
+  $("#np_image_modal_img").attr("src", "");
+}
+
+$("#np_image_modal").on("click", function(e) {
+  if (e.target !== this) return;
+  closeImageModal();
+});
+
+$("#np_image_close").on("click", function(e) {
+  e.preventDefault();
+  closeImageModal();
+});
+
+$("#np_image_zoom_in").on("click", function(e) {
+  e.preventDefault();
+  npImageZoom = Math.min(4, npImageZoom + 0.35);
+  $("#np_image_modal").css("--np-image-zoom", npImageZoom);
+});
+
+$("#np_image_zoom_out").on("click", function(e) {
+  e.preventDefault();
+  npImageZoom = Math.max(0.8, npImageZoom - 0.35);
+  $("#np_image_modal").css("--np-image-zoom", npImageZoom);
+});
+
+$("#np_image_popup").on("click", function(e) {
+  e.preventDefault();
+  var src = $("#np_image_modal_img").attr("src");
+  if (!src) return;
+  var win = window.open("", "ff_naverpaper_login_preview", "width=720,height=980,scrollbars=yes,resizable=yes");
+  if (!win) return;
+  win.document.open();
+  win.document.write('<!doctype html><html><head><title>Naver Login Preview</title><style>body{margin:0;background:#222;text-align:center;}img{width:780px;max-width:none;background:#fff;}</style></head><body><img src="' + src + '"></body></html>');
+  win.document.close();
+});
+
+$(document).on("keydown", function(e) {
+  if (e.key !== "Escape") return;
+  closeImageModal();
+});
+
+$(document).ready(function() {
+  refreshProfileTitles();
+  renderCookieStatuses();
+});
+</script>
+
+{% endblock %}
