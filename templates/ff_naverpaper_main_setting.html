@@ -38,6 +38,7 @@
 
 <script type="text/javascript">
 var settingTabKey = 'ff_naverpaper:last_setting_tab';
+var runNowRequesting = false;
 
 $(document).ajaxSuccess(function(_event, xhr, settings) {
   if (!settings || !settings.url || settings.url.indexOf('/ajax/setting_save') === -1) return;
@@ -67,11 +68,13 @@ function restoreSettingTab() {
 
 $("body").on('click', '#run_now_btn', function(e) {
   e.preventDefault();
-  notify('NaverPaper 실행을 백그라운드로 시작합니다.', 'info');
+  if (runNowRequesting) return;
+  runNowRequesting = true;
+  $('#run_now_btn').prop('disabled', true);
   globalSendCommand('run_now', null, null, null, function(ret) {
-    if (ret.ret === 'success') {
-      notify(ret.msg || '백그라운드 실행을 시작했습니다. 결과 페이지에서 완료 기록을 확인하세요.', 'success');
-    } else {
+    runNowRequesting = false;
+    $('#run_now_btn').prop('disabled', false);
+    if (ret.ret !== 'success') {
       notify(ret.msg || '실행 시작 실패', 'warning');
     }
   });

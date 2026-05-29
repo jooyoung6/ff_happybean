@@ -30,12 +30,15 @@ DESKTOP_UA = (
 )
 REWARD_URL_PREFIXES = (
     "https://campaign2.naver.com",
-    "https://external-token.pay.naver.com",
-    "https://point.pay.naver.com/bridge/eventbenefit",
+    "https://nsl.pincrux.com/live-view.html",
 )
 EXCLUDED_REWARD_URL_PREFIXES = (
     "https://ofw.adison.co",
 )
+REWARD_KIND_CAMPAIGN2 = "campaign2"
+REWARD_KIND_LIVE_VIEW = "live_view"
+REWARD_KIND_EXCLUDED = "excluded"
+REWARD_KIND_OTHER = "other"
 NAVERPAY_MAIN_URL = "https://point.pay.naver.com/pc/main"
 NAVERPAY_MISSION_DETAIL_URL = "https://point.pay.naver.com/pc/mission-detail?dataType=category&rank=20&pageKey=all"
 
@@ -59,6 +62,23 @@ class CampaignUrl(Base):
     url = Column(String, primary_key=True)
     date_added = Column(DateTime, default=datetime.now)
     is_available = Column(Boolean, default=True)
+
+
+class ExcludedRewardSource(Base):
+    __tablename__ = "excluded_reward_sources"
+
+    source_key = Column(String, primary_key=True)
+    target_url = Column(Text, default="")
+    updated_at = Column(DateTime, default=datetime.now)
+
+
+class RewardSourceResolution(Base):
+    __tablename__ = "reward_source_resolutions"
+
+    source_key = Column(String, primary_key=True)
+    final_kind = Column(String, default="")
+    final_url = Column(Text, default="")
+    updated_at = Column(DateTime, default=datetime.now)
 
 
 class UrlVisit(Base):
@@ -107,6 +127,22 @@ class RunDetail(Base):
     run = relationship("RunHistory")
 
 
+class RunAccountSummary(Base):
+    __tablename__ = "run_account_summary"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("run_history.id"))
+    user_id = Column(String, default="")
+    target_url_count = Column(Integer, default=0)
+    skipped_url_count = Column(Integer, default=0)
+    visited_url_count = Column(Integer, default=0)
+    estimated_points = Column(Integer, default=0)
+    detail_count = Column(Integer, default=0)
+    message = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.now)
+    run = relationship("RunHistory")
+
+
 class Database:
     def __init__(self, db_path: str):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -123,6 +159,9 @@ class Database:
             existing = {row[1] for row in conn.execute(text("PRAGMA table_info(run_history)"))}
             if "skipped_url_count" not in existing:
                 conn.execute(text("ALTER TABLE run_history ADD COLUMN skipped_url_count INTEGER DEFAULT 0"))
+            existing = {row[1] for row in conn.execute(text("PRAGMA table_info(run_account_summary)"))}
+            if existing and "target_url_count" not in existing:
+                conn.execute(text("ALTER TABLE run_account_summary ADD COLUMN target_url_count INTEGER DEFAULT 0"))
 
     @contextmanager
     def get_session(self):
@@ -177,6 +216,7 @@ class RunResult:
     estimated_points: int = 0
     message: str = ""
     details: list[DetailResult] = field(default_factory=list)
+    account_results: list = field(default_factory=list)
 
 
 def parse_accounts(ids_text: str, passwords_text: str) -> list[AccountConfig]:
@@ -246,7 +286,7 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
         try:
             emit("Campaign URL collection started")
             emit(f"Proxy mode login={mask_proxy_url(config.login_proxy_url)} reward={mask_proxy_url(config.reward_proxy_url)}")
-            collected_urls, existing_collected_urls = await save_naver_campaign_urls(
+            collected_urls, _existing_collected_urls, account_collected_urls = await save_naver_campaign_urls(
                 session_db,
                 emit,
                 config.reward_proxy_url,
@@ -256,9 +296,13 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
             )
             result.collected_url_count = len(collected_urls)
             emit(f"Campaign URL collection finished: {result.collected_url_count}")
-            new_collected_urls = collected_urls - existing_collected_urls
+            excluded_reward_sources = load_excluded_reward_sources(session_db)
+            if excluded_reward_sources:
+                emit(f"Loaded excluded reward sources: {len(excluded_reward_sources)}")
 
             for account in config.accounts:
+                account_candidate_urls = set(collected_urls)
+                account_candidate_urls.update(account_collected_urls.get(account.user_id, set()))
                 account_result = await process_account(
                     account,
                     session_db,
@@ -266,9 +310,10 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
                     config.reward_proxy_url,
                     emit,
                     config.login_proxy_url,
-                    new_collected_urls,
-                    len(existing_collected_urls),
+                    account_candidate_urls,
+                    excluded_reward_sources,
                 )
+                result.account_results.append(account_result)
                 result.estimated_points += account_result.estimated_points
                 result.skipped_url_count += account_result.skipped_url_count
                 result.visited_url_count += account_result.visited_url_count
@@ -284,6 +329,18 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
                             message=detail.message,
                         )
                     )
+                session_db.add(
+                    RunAccountSummary(
+                        run_id=history.id,
+                        user_id=account.user_id,
+                        target_url_count=account_result.target_url_count,
+                        skipped_url_count=account_result.skipped_url_count,
+                        visited_url_count=account_result.visited_url_count,
+                        estimated_points=account_result.estimated_points,
+                        detail_count=len(account_result.details),
+                        message=account_result.message if hasattr(account_result, "message") else "",
+                    )
+                )
                 if config.no_paper_record and account_result.visited_url_count == 0 and not account_result.details:
                     session_db.add(
                         RunDetail(
@@ -356,6 +413,7 @@ async def run_manual_link(
                     emit,
                     login_proxy_url,
                 )
+                result.account_results.append(account_result)
                 result.estimated_points += account_result.estimated_points
                 result.skipped_url_count += account_result.skipped_url_count
                 result.visited_url_count += account_result.visited_url_count
@@ -371,6 +429,18 @@ async def run_manual_link(
                             message=detail.message,
                         )
                     )
+                session_db.add(
+                    RunAccountSummary(
+                        run_id=history.id,
+                        user_id=account.user_id,
+                        target_url_count=account_result.target_url_count,
+                        skipped_url_count=account_result.skipped_url_count,
+                        visited_url_count=account_result.visited_url_count,
+                        estimated_points=account_result.estimated_points,
+                        detail_count=len(account_result.details),
+                        message=account_result.message if hasattr(account_result, "message") else "",
+                    )
+                )
 
             result.status = "completed"
             result.message = ""
@@ -412,6 +482,7 @@ def run_manual_link_sync(
 @dataclass
 class AccountResult:
     user_id: str
+    target_url_count: int = 0
     visited_url_count: int = 0
     skipped_url_count: int = 0
     estimated_points: int = 0
@@ -1271,6 +1342,21 @@ async def process_campaign2_link(page, link: str, session_db, user_id: str, emit
     return DetailResult(user_id=user_id, url=link, status=status, point=0, message=message)
 
 
+async def process_live_view_link(page, link: str, user_id: str, emit: Callable[[str], None], seconds: int = 1):
+    try:
+        await page.goto(link, wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        await campaign_page_diagnostic(page, user_id, "live-view goto timeout/error", emit)
+        raise
+    dwell_seconds = max(1, int(seconds or 1)) + 3
+    ready_wait = await wait_for_dwell_ready(page)
+    dwell_started_at = time.monotonic()
+    await asyncio.sleep(dwell_seconds)
+    actual_dwell = time.monotonic() - dwell_started_at
+    emit_visited(user_id, page.url, emit, dwell_seconds=dwell_seconds, actual_dwell=actual_dwell, ready_wait=ready_wait)
+    return DetailResult(user_id=user_id, url=link, status="visited", message=f"live-view watched: {dwell_seconds}s")
+
+
 async def wait_for_campaign2_popup(page, timeout_ms: int = 12000):
     deadline = time.time() + (timeout_ms / 1000)
     while time.time() < deadline:
@@ -1592,11 +1678,17 @@ def ppomppu_target_url(link: str) -> str:
         return ""
 
 
-async def visit_campaign_url(page, link: str, session_db, user_id: str, emit: Callable[[str], None]):
+async def visit_campaign_url(page, link: str, session_db, user_id: str, emit: Callable[[str], None], excluded_reward_sources: Optional[set[str]] = None):
+    excluded_reward_sources = excluded_reward_sources if excluded_reward_sources is not None else set()
+    if reward_source_key(link) in excluded_reward_sources:
+        emit(f"{user_id}: skipped known excluded reward source - {link}")
+        return DetailResult(user_id=user_id, url=link, status="skipped", message="known excluded reward source")
     if is_excluded_reward_url(link):
         return DetailResult(user_id=user_id, url=link, status="skipped", message="excluded reward URL")
     if link.startswith("https://campaign2"):
         return await process_campaign2_link(page, link, session_db, user_id, emit)
+    if link.startswith("https://nsl.pincrux.com/live-view.html"):
+        return await process_live_view_link(page, link, user_id, emit)
 
     try:
         await page.goto(link, wait_until="domcontentloaded", timeout=20000)
@@ -1609,18 +1701,22 @@ async def visit_campaign_url(page, link: str, session_db, user_id: str, emit: Ca
         pass
     if is_excluded_reward_url(page.url):
         emit(f"{user_id}: excluded reward URL - {page.url}")
+        record_excluded_reward_source(session_db, excluded_reward_sources, link, page.url)
         return DetailResult(user_id=user_id, url=link, status="skipped", message="excluded reward URL")
     emit(f"{user_id}: visited {page.url}")
     if page.url.startswith("https://campaign2"):
         return await process_campaign2_link(page, page.url, session_db, user_id, emit)
+    if page.url.startswith("https://nsl.pincrux.com/live-view.html"):
+        return await process_live_view_link(page, page.url, user_id, emit)
     if "point.pay.naver.com/mission-detail" in page.url or "point.pay.naver.com/pc/mission-detail" in page.url:
-        return await handle_naverpay_mission_detail(page, link, session_db, user_id, emit)
+        return await handle_naverpay_mission_detail(page, link, session_db, user_id, emit, excluded_reward_sources)
     if "nsl.pincrux.com/shopping-live" in page.url or "nsl.pincrux.com/shopping-live" in link:
         return await handle_pincrux_shopping_live(page, link, user_id, emit)
-    return DetailResult(user_id=user_id, url=link, status="visited", message=f"visited: {page.url}")
+    return DetailResult(user_id=user_id, url=link, status="skipped", message=f"unsupported final URL: {page.url}")
 
 
-async def handle_naverpay_mission_detail(page, link: str, session_db, user_id: str, emit: Callable[[str], None]):
+async def handle_naverpay_mission_detail(page, link: str, session_db, user_id: str, emit: Callable[[str], None], excluded_reward_sources: Optional[set[str]] = None):
+    excluded_reward_sources = excluded_reward_sources if excluded_reward_sources is not None else set()
     try:
         await collect_lazy_page_content(page)
         rows = await collect_naverpay_mission_reward_rows(page)
@@ -1632,11 +1728,16 @@ async def handle_naverpay_mission_detail(page, link: str, session_db, user_id: s
     for row in rows[:40]:
         href = str(row.get("href") or "")
         target_id = str(row.get("id") or "")
+        source_key = reward_source_key(str(row.get("source_key") or "") or href or str(row.get("text") or ""))
         row_seconds = max(1, int(row.get("seconds") or 5))
         if not href and not target_id:
             continue
+        if source_key and source_key in excluded_reward_sources:
+            emit(f"{user_id}: skipped known excluded reward source - {source_key}")
+            continue
         if is_excluded_reward_url(href):
             emit(f"{user_id}: excluded reward URL - {href}")
+            record_excluded_reward_source(session_db, excluded_reward_sources, source_key, href)
             continue
         work_page = None
         try:
@@ -1667,6 +1768,7 @@ async def handle_naverpay_mission_detail(page, link: str, session_db, user_id: s
             await wait_for_bridge_redirect(active_page)
             if is_excluded_reward_url(active_page.url):
                 emit(f"{user_id}: excluded reward URL - {active_page.url}")
+                record_excluded_reward_source(session_db, excluded_reward_sources, source_key, active_page.url)
                 if work_page is None and active_page is not page:
                     try:
                         await active_page.close()
@@ -1770,23 +1872,31 @@ async def collect_naverpay_mission_reward_rows(page):
                     el.dataset.naverpaperMissionId = String(candidates.length + 1);
                 }
                 const href = el.href || '';
+                const onclick = el.getAttribute('onclick') || '';
                 const secondsMatch = text.match(/(\\d+)\\s*ì´ˆ/);
                 const key = href || el.dataset.naverpaperMissionId || text;
                 if (seen.has(key)) continue;
                 seen.add(key);
-                candidates.push({ id: el.dataset.naverpaperMissionId, href, text, seconds: secondsMatch ? Number(secondsMatch[1] || 5) : 5 });
+                candidates.push({ id: el.dataset.naverpaperMissionId, href, text, source_key: href || onclick || text, seconds: secondsMatch ? Number(secondsMatch[1] || 5) : 5 });
             }
             return candidates;
         }"""
     )
 
 
-async def process_campaign_links(page, campaign_links, session_db, user_id: str, emit: Callable[[str], None]):
+async def process_campaign_links(page, campaign_links, session_db, user_id: str, emit: Callable[[str], None], excluded_reward_sources: Optional[set[str]] = None):
+    excluded_reward_sources = excluded_reward_sources if excluded_reward_sources is not None else set()
     details = []
     for link in campaign_links:
         try:
+            link_key = reward_source_key(link)
+            if link_key in excluded_reward_sources:
+                emit(f"{user_id}: skipped known excluded reward source - {link}")
+                details.append(DetailResult(user_id=user_id, url=link, status="skipped", message="known excluded reward source"))
+                continue
             if is_excluded_reward_url(link):
                 emit(f"{user_id}: excluded reward URL - {link}")
+                record_excluded_reward_source(session_db, excluded_reward_sources, link, link)
                 details.append(DetailResult(user_id=user_id, url=link, status="skipped", message="excluded reward URL"))
                 continue
             if link.startswith("https://campaign2"):
@@ -1806,18 +1916,25 @@ async def process_campaign_links(page, campaign_links, session_db, user_id: str,
                 target_url = redirected_url
                 if redirected_url.startswith("https://s.ppomppu.co.kr") and fallback_url:
                     target_url = fallback_url
+                if target_url in excluded_reward_sources:
+                    detail = DetailResult(user_id=user_id, url=link, status="skipped", message="known excluded reward source")
+                    emit(f"{user_id}: skipped known excluded reward source - {target_url}")
+                    details.append(detail)
+                    continue
                 if is_excluded_reward_url(target_url):
                     detail = DetailResult(user_id=user_id, url=link, status="skipped", message="excluded reward URL")
                     emit(f"{user_id}: excluded reward URL - {target_url}")
+                    record_excluded_reward_source(session_db, excluded_reward_sources, target_url, target_url)
+                    record_excluded_reward_source(session_db, excluded_reward_sources, link, target_url)
                     details.append(detail)
                     continue
                 if target_url.startswith("https://campaign2"):
                     detail = await process_campaign2_link(page, target_url, session_db, user_id, emit)
                 else:
-                    detail = await visit_campaign_url(page, target_url, session_db, user_id, emit)
+                    detail = await visit_campaign_url(page, target_url, session_db, user_id, emit, excluded_reward_sources)
                 detail.url = link
             else:
-                detail = await visit_campaign_url(page, link, session_db, user_id, emit)
+                detail = await visit_campaign_url(page, link, session_db, user_id, emit, excluded_reward_sources)
             existing_visit = session_db.query(UrlVisit).filter_by(url=link, user_id=user_id).first()
             if not existing_visit:
                 session_db.add(UrlVisit(url=link, user_id=user_id, visited_at=datetime.now()))
@@ -1875,18 +1992,16 @@ async def process_account(
     emit: Callable[[str], None],
     login_proxy_url: str = "",
     candidate_urls: Optional[set[str]] = None,
-    existing_collected_count: int = 0,
+    excluded_reward_sources: Optional[set[str]] = None,
 ) -> AccountResult:
     from playwright.async_api import async_playwright
     from playwright_stealth import Stealth
 
     result = AccountResult(user_id=account.user_id)
-    result.skipped_url_count = int(existing_collected_count or 0)
-    if result.skipped_url_count:
-        emit(f"{account.user_id}: skipped existing collected URLs={result.skipped_url_count}")
     campaign_links, already_visited_count = await fetch_naver_campaign_urls(session_db, account.user_id, candidate_urls)
+    result.target_url_count = len(campaign_links) + already_visited_count
     if already_visited_count:
-        emit(f"{account.user_id}: excluded previously visited URLs={already_visited_count}")
+        emit(f"{account.user_id}: skipped previously visited URLs={already_visited_count}")
         result.skipped_url_count += already_visited_count
     if not campaign_links:
         return result
@@ -1916,7 +2031,7 @@ async def process_account(
         login_ok, login_message = await naver_login(page, account, cookie_dir, emit)
         if login_ok:
             before_points = await get_naverpay_point_balance(page)
-            details = await process_campaign_links(page, campaign_links, session_db, account.user_id, emit)
+            details = await process_campaign_links(page, campaign_links, session_db, account.user_id, emit, excluded_reward_sources)
             after_points = await get_naverpay_point_balance(page)
             result.details.extend(details)
             result.skipped_url_count += len([x for x in details if x.status in ("skipped", "unavailable", "no_url")])
@@ -1967,6 +2082,7 @@ async def process_account_manual_link(
     from playwright_stealth import Stealth
 
     result = AccountResult(user_id=account.user_id)
+    result.target_url_count = 1
     storage_state = await ensure_cookie_storage_state(account, session_db, cookie_dir, login_proxy_url, emit)
     if not storage_state:
         result.details.append(DetailResult(user_id=account.user_id, status="login_error", message="cookie auto refresh failed"))
@@ -2110,7 +2226,9 @@ async def process_ppomppu_url(url, soup, session, collected_urls, emit, proxy_ur
         for a_tag in inner_soup.find_all("a", class_="noeffect", href=True):
             href = a_tag["href"]
             if href.startswith("https://s.ppomppu.co.kr?idno=coupon") and len(href) > 40:
-                collected_urls.add(href)
+                target_url = canonical_reward_url(ppomppu_target_url(href))
+                if is_reward_url(target_url):
+                    collected_urls.add(target_url)
 
 
 def is_reward_url(href: str) -> bool:
@@ -2120,12 +2238,94 @@ def is_reward_url(href: str) -> bool:
         return False
     if href.startswith("https://campaign2.naver.com"):
         event_id = (parse_qs(urlparse(href).query).get("eventId") or [""])[0]
-        return len(event_id) >= 10
+        return len(event_id) >= 10 or "/npay/branddraw" in href or "/global10save" in href
+    if href.startswith("https://nsl.pincrux.com/live-view.html"):
+        return "enc_param=" in href
     return True
 
 
 def is_excluded_reward_url(href: str) -> bool:
     return str(href or "").strip().startswith(EXCLUDED_REWARD_URL_PREFIXES)
+
+
+def is_account_scoped_reward_url(href: str) -> bool:
+    href = str(href or "").strip()
+    return href.startswith("https://nsl.pincrux.com/live-view.html")
+
+
+def reward_source_key(source_url: str) -> str:
+    source_url = str(source_url or "").strip()
+    parsed = urlparse(source_url)
+    if parsed.netloc == "point.pay.naver.com" and parsed.path == "/bridge/eventbenefit":
+        query = parse_qs(parsed.query)
+        ad_id = (query.get("adId") or [""])[0]
+        placement_id = (query.get("placementId") or [""])[0]
+        inventory = (query.get("inventory") or [""])[0]
+        if ad_id:
+            return f"naverpay_bridge:{inventory}:{placement_id}:{ad_id}"
+    return source_url
+
+
+def classify_reward_final_url(url: str) -> str:
+    url = str(url or "").strip()
+    if is_excluded_reward_url(url):
+        return REWARD_KIND_EXCLUDED
+    if url.startswith("https://campaign2.naver.com"):
+        return REWARD_KIND_CAMPAIGN2
+    if url.startswith("https://nsl.pincrux.com/live-view.html"):
+        return REWARD_KIND_LIVE_VIEW
+    if "nsl.pincrux.com/shopping-live" in url:
+        return REWARD_KIND_LIVE_VIEW
+    return REWARD_KIND_OTHER
+
+
+def load_excluded_reward_sources(session_db) -> set[str]:
+    try:
+        return {reward_source_key(row.source_key) for row in session_db.query(ExcludedRewardSource).all() if row.source_key}
+    except Exception:
+        return set()
+
+
+def record_excluded_reward_source(session_db, excluded_reward_sources: Optional[set[str]], source_key: str, target_url: str = ""):
+    source_key = reward_source_key(source_key)
+    if not source_key:
+        return
+    if excluded_reward_sources is not None:
+        excluded_reward_sources.add(source_key)
+    try:
+        session_db.merge(ExcludedRewardSource(source_key=source_key, target_url=str(target_url or ""), updated_at=datetime.now()))
+    except Exception:
+        pass
+
+
+def load_reward_source_resolutions(session_db) -> dict[str, tuple[str, str]]:
+    try:
+        return {
+            row.source_key: (row.final_kind or "", row.final_url or "")
+            for row in session_db.query(RewardSourceResolution).all()
+            if row.source_key
+        }
+    except Exception:
+        return {}
+
+
+def record_reward_source_resolution(session_db, cache: dict[str, tuple[str, str]], source_key: str, final_kind: str, final_url: str = ""):
+    source_key = reward_source_key(source_key)
+    if not source_key:
+        return
+    final_url = canonical_reward_url(final_url)
+    cache[source_key] = (final_kind, final_url)
+    try:
+        session_db.merge(
+            RewardSourceResolution(
+                source_key=source_key,
+                final_kind=final_kind,
+                final_url=final_url,
+                updated_at=datetime.now(),
+            )
+        )
+    except Exception:
+        pass
 
 
 def canonical_reward_url(href: str) -> str:
@@ -2326,6 +2526,7 @@ async def process_naverpay_mission_detail_source(
     emit,
     reward_proxy_url: str = "",
     login_proxy_url: str = "",
+    source_resolutions: Optional[dict[str, tuple[str, str]]] = None,
 ):
     from playwright.async_api import async_playwright
     from playwright_stealth import Stealth
@@ -2359,12 +2560,46 @@ async def process_naverpay_mission_detail_source(
             await page.wait_for_timeout(3000)
             await collect_lazy_page_content(page)
             emit(f"naverpay mission detail lazy content collected for {account.user_id}")
+            source_resolutions = source_resolutions if source_resolutions is not None else {}
             bridge_urls = await collect_naverpay_mission_source_urls(page)
             emit(f"naverpay mission detail bridge urls for {account.user_id}: {len(bridge_urls)}")
-            campaign_urls = await resolve_naverpay_bridge_urls_to_campaign2(page, bridge_urls, emit, account.user_id)
-            emit(f"naverpay mission detail campaign urls for {account.user_id}: {len(campaign_urls)}")
-            for reward_url in campaign_urls:
-                add_reward_url(collected_urls, reward_url)
+            campaign_count = 0
+            live_count = 0
+            resolved_count = 0
+            total = len(bridge_urls)
+            for idx, bridge_url in enumerate(bridge_urls, 1):
+                source_key = reward_source_key(bridge_url)
+                cached = source_resolutions.get(source_key)
+                if cached:
+                    final_kind, final_url = cached
+                    if final_kind == REWARD_KIND_CAMPAIGN2 and is_reward_url(final_url):
+                        add_reward_url(collected_urls, final_url)
+                        campaign_count += 1
+                    elif final_kind == REWARD_KIND_LIVE_VIEW:
+                        final_kind, final_url, live_urls = await resolve_naverpay_bridge_url_for_collection(page, bridge_url)
+                        for live_url in live_urls:
+                            add_reward_url(collected_urls, live_url)
+                            live_count += 1
+                    continue
+                if emit and (idx == 1 or idx == total or idx % 5 == 0):
+                    emit(f"naverpay mission detail resolving bridge urls for {account.user_id}: {idx}/{total}")
+                final_kind, final_url, live_urls = await resolve_naverpay_bridge_url_for_collection(page, bridge_url)
+                record_reward_source_resolution(session_db, source_resolutions, source_key, final_kind, final_url)
+                resolved_count += 1
+                if final_kind == REWARD_KIND_EXCLUDED:
+                    record_excluded_reward_source(session_db, None, source_key, final_url)
+                    continue
+                if final_kind == REWARD_KIND_CAMPAIGN2 and is_reward_url(final_url):
+                    add_reward_url(collected_urls, final_url)
+                    campaign_count += 1
+                elif final_kind == REWARD_KIND_LIVE_VIEW:
+                    for live_url in live_urls:
+                        add_reward_url(collected_urls, live_url)
+                        live_count += 1
+            emit(
+                f"naverpay mission detail reward urls for {account.user_id}: "
+                f"campaign2={campaign_count} live-view={live_count} newly-resolved={resolved_count}"
+            )
         finally:
             await context.close()
             await browser.close()
@@ -2394,7 +2629,11 @@ async def collect_naverpay_mission_source_urls(page) -> list[str]:
         )
     except Exception:
         return []
-    return [str(url or "").strip() for url in raw_rows or [] if is_reward_url(str(url or "").strip())]
+    return [
+        str(url or "").strip()
+        for url in raw_rows or []
+        if str(url or "").strip().startswith("https://point.pay.naver.com/bridge/eventbenefit")
+    ]
 
 
 async def resolve_naverpay_bridge_urls_to_campaign2(
@@ -2417,6 +2656,88 @@ async def resolve_naverpay_bridge_urls_to_campaign2(
             seen.add(campaign_url)
             resolved.append(campaign_url)
     return resolved
+
+
+async def collect_pincrux_live_view_urls(page) -> list[str]:
+    urls = []
+    seen = set()
+
+    def add(url: str):
+        url = canonical_reward_url(str(url or "").strip())
+        if is_reward_url(url) and url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    add(page.url)
+    if "nsl.pincrux.com/shopping-live" not in str(page.url or ""):
+        return urls
+
+    try:
+        await expand_pincrux_live_more(page)
+    except Exception:
+        pass
+    try:
+        rows = await collect_pincrux_short_live_rows(page)
+        for row in rows:
+            add(str(row.get("href") or ""))
+    except Exception:
+        pass
+
+    candidates = [
+        ("text=ë¼ì´ë¸Œ ì¤‘ì´ì—ìš”!", True),
+        ("text=5ì´ˆ ë³´ë©´", True),
+        ("xpath=//*[contains(normalize-space(.), 'ë¼ì´ë¸Œ ì¤‘ì´ì—ìš”!')]/ancestor::*[self::a or self::button or @role='button' or @onclick][1]", False),
+        ("xpath=//*[contains(normalize-space(.), '5ì´ˆ ë³´ë©´')]/ancestor::*[self::a or self::button or @role='button' or @onclick][1]", False),
+    ]
+    for selector, js_click in candidates:
+        try:
+            before_pages = list(page.context.pages)
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                continue
+            if js_click:
+                await locator.evaluate(
+                    """el => {
+                        const target = el.closest('a, button, [role="button"], [onclick]') || el;
+                        target.click();
+                    }"""
+                )
+            else:
+                await locator.click(timeout=5000, force=True)
+            await asyncio.sleep(1)
+            pages = list(page.context.pages)
+            active_page = ([candidate for candidate in pages if candidate not in before_pages] or [page])[-1]
+            try:
+                await active_page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            add(active_page.url)
+            if active_page is not page:
+                try:
+                    await active_page.close()
+                except Exception:
+                    pass
+            if urls:
+                break
+        except Exception:
+            pass
+    return urls
+
+
+async def resolve_naverpay_bridge_url_for_collection(page, bridge_url: str) -> tuple[str, str, list[str]]:
+    try:
+        await page.goto(bridge_url, wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        return REWARD_KIND_OTHER, "", []
+    await wait_for_bridge_redirect(page, timeout_ms=10000)
+    current_url = canonical_reward_url(page.url)
+    final_kind = classify_reward_final_url(current_url)
+    if final_kind == REWARD_KIND_CAMPAIGN2:
+        return final_kind, current_url, [current_url] if is_reward_url(current_url) else []
+    if final_kind == REWARD_KIND_LIVE_VIEW:
+        live_urls = await collect_pincrux_live_view_urls(page)
+        return final_kind, live_urls[0] if live_urls else current_url, live_urls
+    return final_kind, current_url, []
 
 
 async def resolve_naverpay_bridge_url_to_campaign2(page, bridge_url: str) -> str:
@@ -2482,6 +2803,16 @@ async def save_naver_campaign_urls(
     from aiohttp import ClientSession, ClientTimeout
 
     collected_urls = set()
+    account_collected_urls = {}
+    source_resolutions = load_reward_source_resolutions(session_db)
+
+    def add_collected_for_account(user_id: str, urls: set[str]):
+        account_only = {url for url in urls if is_account_scoped_reward_url(url)}
+        common = set(urls) - account_only
+        collected_urls.update(common)
+        if account_only:
+            account_collected_urls.setdefault(user_id, set()).update(account_only)
+
     urls = [
         ("https://www.clien.net/service/board/jirum", process_clien_url),
         ("https://m.ppomppu.co.kr/new/bbs_list.php?id=coupon&extref=1", process_ppomppu_url),
@@ -2489,18 +2820,20 @@ async def save_naver_campaign_urls(
     ]
     for account in accounts or []:
         try:
-            before = len(collected_urls)
+            account_urls = set()
             emit(f"collection source {NAVERPAY_MISSION_DETAIL_URL} ({account.user_id}) started")
             await process_naverpay_mission_detail_source(
                 account,
                 session_db,
                 cookie_dir,
-                collected_urls,
+                account_urls,
                 emit,
                 reward_proxy_url,
                 login_proxy_url,
+                source_resolutions,
             )
-            emit(f"collection source {NAVERPAY_MISSION_DETAIL_URL} ({account.user_id}): +{len(collected_urls) - before}")
+            add_collected_for_account(account.user_id, account_urls)
+            emit(f"collection source {NAVERPAY_MISSION_DETAIL_URL} ({account.user_id}): +{len(account_urls)}")
         except Exception as e:
             emit(f"{NAVERPAY_MISSION_DETAIL_URL}: collection error for {account.user_id} - {e}")
 
@@ -2520,18 +2853,19 @@ async def save_naver_campaign_urls(
 
     for account in accounts or []:
         try:
-            before = len(collected_urls)
+            account_urls = set()
             emit(f"collection source {NAVERPAY_MAIN_URL} ({account.user_id}) started")
             await process_naverpay_point_main(
                 account,
                 session_db,
                 cookie_dir,
-                collected_urls,
+                account_urls,
                 emit,
                 reward_proxy_url,
                 login_proxy_url,
             )
-            emit(f"collection source {NAVERPAY_MAIN_URL} ({account.user_id}): +{len(collected_urls) - before}")
+            add_collected_for_account(account.user_id, account_urls)
+            emit(f"collection source {NAVERPAY_MAIN_URL} ({account.user_id}): +{len(account_urls)}")
         except Exception as e:
             emit(f"{NAVERPAY_MAIN_URL}: collection error for {account.user_id} - {e}")
 
@@ -2544,17 +2878,33 @@ async def save_naver_campaign_urls(
             existing_collected_urls.add(link)
         else:
             session_db.add(CampaignUrl(url=link))
-    return collected_urls, existing_collected_urls
+    return collected_urls, existing_collected_urls, account_collected_urls
 
 
 async def fetch_naver_campaign_urls(session_db, nid: str, candidate_urls: Optional[set[str]] = None):
     campaign_links = set()
     already_visited_count = 0
-    query = session_db.query(CampaignUrl).filter_by(is_available=True)
     if candidate_urls is not None:
         if not candidate_urls:
             return campaign_links, already_visited_count
-        query = query.filter(CampaignUrl.url.in_(candidate_urls))
+        for link in candidate_urls:
+            link = str(link or "").strip()
+            if not link or is_excluded_reward_url(link):
+                continue
+            url_obj = session_db.query(CampaignUrl).filter_by(url=link).first()
+            if url_obj and not url_obj.is_available:
+                continue
+            if should_revisit_url(link):
+                campaign_links.add(link)
+                continue
+            existing_visit = session_db.query(UrlVisit).filter_by(url=link, user_id=nid).first()
+            if not existing_visit:
+                campaign_links.add(link)
+            else:
+                already_visited_count += 1
+        return campaign_links, already_visited_count
+
+    query = session_db.query(CampaignUrl).filter_by(is_available=True)
     available_urls = query.all()
     for url_obj in available_urls:
         if is_excluded_reward_url(url_obj.url):
@@ -2571,7 +2921,7 @@ async def fetch_naver_campaign_urls(session_db, nid: str, candidate_urls: Option
 
 
 def should_revisit_url(url: str) -> bool:
-    return "external-token.pay.naver.com/entry/pincrux" in str(url or "") or "nsl.pincrux.com/shopping-live" in str(url or "")
+    return str(url or "").startswith("https://nsl.pincrux.com/live-view.html")
 
 
 def delete_old_stuff(session_db, keep_campaign_days: int, keep_user_days: int, emit: Callable[[str], None]):
@@ -2596,12 +2946,127 @@ def recent_runs(db_path: str, limit: int = 30):
         return [_history_to_dict(row) for row in rows]
 
 
+def recent_run_account_tabs(db_path: str, limit: int = 30):
+    db = Database(db_path)
+    db.create_all()
+    with db.get_session() as session:
+        histories = session.query(RunHistory).order_by(RunHistory.id.desc()).limit(limit).all()
+        if not histories:
+            return []
+
+        run_map = {row.id: _history_to_dict(row) for row in histories}
+        tabs = {}
+        order = []
+
+        summaries = (
+            session.query(RunAccountSummary)
+            .filter(RunAccountSummary.run_id.in_(list(run_map.keys())))
+            .order_by(RunAccountSummary.run_id.desc(), RunAccountSummary.id.asc())
+            .all()
+        )
+        for summary in summaries:
+            user_id = summary.user_id or "기타"
+            if user_id not in tabs:
+                tabs[user_id] = {"user_id": user_id, "runs": []}
+                order.append(user_id)
+            base = dict(run_map.get(summary.run_id) or {})
+            if not base:
+                continue
+            base.update(
+                {
+                    "user_id": user_id,
+                    "target_url_count": summary.target_url_count or ((summary.skipped_url_count or 0) + (summary.visited_url_count or 0)),
+                    "skipped_url_count": summary.skipped_url_count or 0,
+                    "visited_url_count": summary.visited_url_count or 0,
+                    "estimated_points": summary.estimated_points or 0,
+                    "detail_count": summary.detail_count or 0,
+                }
+            )
+            tabs[user_id]["runs"].append(base)
+
+        summarized_run_ids = {row.run_id for row in summaries}
+        for history in histories:
+            if history.id in summarized_run_ids:
+                continue
+            details = session.query(RunDetail).filter_by(run_id=history.id).all()
+            if not details:
+                user_id = "전체"
+                if user_id not in tabs:
+                    tabs[user_id] = {"user_id": user_id, "runs": []}
+                    order.append(user_id)
+                tabs[user_id]["runs"].append(_history_to_dict(history))
+                continue
+            grouped = {}
+            for detail in details:
+                user_id = detail.user_id or "기타"
+                grouped.setdefault(user_id, {"target": 0, "skipped": 0, "visited": 0, "points": 0, "details": 0})
+                grouped[user_id]["target"] += 1
+                grouped[user_id]["details"] += 1
+                if detail.status in ("skipped", "unavailable", "no_url"):
+                    grouped[user_id]["skipped"] += 1
+                elif detail.status != "error":
+                    grouped[user_id]["visited"] += 1
+                grouped[user_id]["points"] += int(detail.point or 0)
+            for user_id, values in grouped.items():
+                if user_id not in tabs:
+                    tabs[user_id] = {"user_id": user_id, "runs": []}
+                    order.append(user_id)
+                base = _history_to_dict(history)
+                base.update(
+                    {
+                        "user_id": user_id,
+                        "target_url_count": values["target"],
+                        "skipped_url_count": values["skipped"],
+                        "visited_url_count": values["visited"],
+                        "estimated_points": values["points"],
+                        "detail_count": values["details"],
+                    }
+                )
+                tabs[user_id]["runs"].append(base)
+
+        return [tabs[user_id] for user_id in order]
+
+
 def run_details(db_path: str, run_id: int):
     db = Database(db_path)
     db.create_all()
     with db.get_session() as session:
         rows = session.query(RunDetail).filter_by(run_id=run_id).order_by(RunDetail.id.asc()).all()
         return [_detail_to_dict(row) for row in rows]
+
+
+def run_account_summaries(db_path: str, run_id: int):
+    db = Database(db_path)
+    db.create_all()
+    with db.get_session() as session:
+        rows = session.query(RunAccountSummary).filter_by(run_id=run_id).order_by(RunAccountSummary.id.asc()).all()
+        if rows:
+            return [_account_summary_to_dict(row) for row in rows]
+
+        details = session.query(RunDetail).filter_by(run_id=run_id).order_by(RunDetail.id.asc()).all()
+        grouped = {}
+        order = []
+        for detail in details:
+            user_id = detail.user_id or ""
+            if user_id not in grouped:
+                grouped[user_id] = {
+                    "user_id": user_id,
+                    "target_url_count": 0,
+                    "skipped_url_count": 0,
+                    "visited_url_count": 0,
+                    "estimated_points": 0,
+                    "detail_count": 0,
+                    "message": "",
+                }
+                order.append(user_id)
+            grouped[user_id]["detail_count"] += 1
+            grouped[user_id]["target_url_count"] += 1
+            if detail.status in ("skipped", "unavailable", "no_url"):
+                grouped[user_id]["skipped_url_count"] += 1
+            elif detail.status != "error":
+                grouped[user_id]["visited_url_count"] += 1
+            grouped[user_id]["estimated_points"] += int(detail.point or 0)
+        return [grouped[user_id] for user_id in order]
 
 
 def cookie_statuses(db_path: str, cookie_dir: str, accounts: list[AccountConfig]):
@@ -2647,6 +3112,21 @@ def _detail_to_dict(row: RunDetail):
         "url": row.url,
         "status": row.status,
         "point": row.point,
+        "message": row.message or "",
+        "created_at": _fmt(row.created_at),
+    }
+
+
+def _account_summary_to_dict(row: RunAccountSummary):
+    return {
+        "id": row.id,
+        "run_id": row.run_id,
+        "user_id": row.user_id,
+        "target_url_count": row.target_url_count or ((row.skipped_url_count or 0) + (row.visited_url_count or 0)),
+        "skipped_url_count": row.skipped_url_count or 0,
+        "visited_url_count": row.visited_url_count or 0,
+        "estimated_points": row.estimated_points or 0,
+        "detail_count": row.detail_count or 0,
         "message": row.message or "",
         "created_at": _fmt(row.created_at),
     }

@@ -132,13 +132,7 @@ class ModuleMain(PluginModuleBase):
         arg["cookie_statuses"] = np_module.cookie_statuses(self._db_path(), self._cookie_dir(), accounts) if np_module else []
         if sub == "result":
             arg["runs"] = np_module.recent_runs(self._db_path(), 50) if np_module else []
-            arg["details"] = []
-            run_id = str(req.args.get("run_id") or "").strip()
-            if np_module and run_id.isdigit():
-                arg["selected_run_id"] = int(run_id)
-                arg["details"] = np_module.run_details(self._db_path(), int(run_id))
-            else:
-                arg["selected_run_id"] = None
+            arg["run_account_tabs"] = np_module.recent_run_account_tabs(self._db_path(), 50) if np_module else []
         return render_template(f"{P.package_name}_{self.name}_{sub}.html", arg=arg)
 
     def process_command(self, command, arg1, arg2, arg3, req):
@@ -229,6 +223,15 @@ class ModuleMain(PluginModuleBase):
                 result.visited_url_count,
                 result.estimated_points,
             )
+            for account_result in getattr(result, "account_results", []) or []:
+                P.logger.info(
+                    "[NaverPaper] account result user=%s skipped=%s visited=%s points=%s details=%s",
+                    getattr(account_result, "user_id", ""),
+                    getattr(account_result, "skipped_url_count", 0),
+                    getattr(account_result, "visited_url_count", 0),
+                    getattr(account_result, "estimated_points", 0),
+                    len(getattr(account_result, "details", []) or []),
+                )
         except Exception:
             P.logger.error(traceback.format_exc())
         finally:
@@ -271,6 +274,15 @@ class ModuleMain(PluginModuleBase):
                 result.visited_url_count,
                 result.estimated_points,
             )
+            for account_result in getattr(result, "account_results", []) or []:
+                P.logger.info(
+                    "[NaverPaper] manual account result user=%s skipped=%s visited=%s points=%s details=%s",
+                    getattr(account_result, "user_id", ""),
+                    getattr(account_result, "skipped_url_count", 0),
+                    getattr(account_result, "visited_url_count", 0),
+                    getattr(account_result, "estimated_points", 0),
+                    len(getattr(account_result, "details", []) or []),
+                )
         except Exception:
             P.logger.error(traceback.format_exc())
         finally:

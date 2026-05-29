@@ -11,37 +11,54 @@
 
 <div class="card mb-3">
   <div class="card-header">최근 실행</div>
-  <div class="card-body p-0">
-    <table class="table table-sm table-hover mb-0">
-      <thead>
-        <tr>
-          <th style="width:8%">ID</th>
-          <th style="width:18%">시작</th>
-          <th style="width:18%">종료</th>
-          <th style="width:9%">계정</th>
-          <th style="width:9%">수집</th>
-          <th style="width:9%">스킵</th>
-          <th style="width:9%">방문</th>
-          <th style="width:9%">포인트</th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for row in arg['runs'] %}
-        <tr>
-          <td>{{ row.id }}</td>
-          <td>{{ row.started_at }}</td>
-          <td>{{ row.finished_at }}</td>
-          <td>{{ row.account_count }}</td>
-          <td>{{ row.collected_url_count }}</td>
-          <td>{{ row.skipped_url_count }}</td>
-          <td>{{ row.visited_url_count }}</td>
-          <td>{{ row.estimated_points }}</td>
-        </tr>
-      {% else %}
-        <tr><td colspan="8" class="text-muted text-center p-3">아직 실행 기록이 없습니다.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
+  <div class="card-body">
+    {% if arg.get('run_account_tabs') %}
+      <nav>
+        {{ macros.m_tab_head_start() }}
+        {% for tab in arg['run_account_tabs'] %}
+          {{ macros.m_tab_head('recent_account_' ~ loop.index0, tab.user_id, loop.first) }}
+        {% endfor %}
+        {{ macros.m_tab_head_end() }}
+      </nav>
+      <div class="tab-content" id="nav-tabContent">
+        {% for tab in arg['run_account_tabs'] %}
+          {{ macros.m_tab_content_start('recent_account_' ~ loop.index0, loop.first) }}
+          <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0">
+              <thead>
+                <tr>
+                  <th style="width:8%">ID</th>
+                  <th style="width:18%">시작</th>
+                  <th style="width:18%">종료</th>
+                  <th style="width:10%">대상</th>
+                  <th style="width:10%">스킵</th>
+                  <th style="width:10%">방문</th>
+                  <th style="width:10%">포인트</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for row in tab.runs %}
+                <tr>
+                  <td>{{ row.id }}</td>
+                  <td>{{ row.started_at }}</td>
+                  <td>{{ row.finished_at }}</td>
+                  <td>{{ row.target_url_count or row.collected_url_count }}</td>
+                  <td>{{ row.skipped_url_count }}</td>
+                  <td>{{ row.visited_url_count }}</td>
+                  <td>{{ row.estimated_points }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="7" class="text-muted text-center p-3">이 계정의 실행 기록이 없습니다.</td></tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {{ macros.m_tab_content_end() }}
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="text-muted text-center p-3">아직 실행 기록이 없습니다.</div>
+    {% endif %}
   </div>
 </div>
 
