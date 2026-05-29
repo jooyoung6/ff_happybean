@@ -57,9 +57,9 @@
           <td colspan="3" class="chromium-path">{{ arg['install_status']['chromium']['path'] }}</td>
         </tr>
         {% if arg['install_status']['chromium']['message'] %}
-        <tr>
+        <tr id="chromium_message_row">
           <th>메시지</th>
-          <td colspan="3" class="text-muted">{{ arg['install_status']['chromium']['message'] }}</td>
+          <td colspan="3" class="text-muted chromium-message">{{ arg['install_status']['chromium']['message'] }}</td>
         </tr>
         {% endif %}
       </tbody>
@@ -114,6 +114,15 @@ function renderStatus(data) {
     var ctr = $('#chromium_table tr[data-key="chromium"]');
     ctr.find('.dependency-state').html(badge(data.chromium.installed));
     $('.chromium-path').text(data.chromium.path || '');
+    var message = data.chromium.message || '';
+    if (message) {
+      if (!$('#chromium_message_row').length) {
+        $('#chromium_table tbody').append('<tr id="chromium_message_row"><th>메시지</th><td colspan="3" class="text-muted chromium-message"></td></tr>');
+      }
+      $('.chromium-message').text(message);
+    } else {
+      $('#chromium_message_row').remove();
+    }
   }
 }
 

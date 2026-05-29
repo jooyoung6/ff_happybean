@@ -30,9 +30,11 @@ DESKTOP_UA = (
 )
 REWARD_URL_PREFIXES = (
     "https://campaign2.naver.com",
-    "https://ofw.adison.co",
     "https://external-token.pay.naver.com",
     "https://point.pay.naver.com/bridge/eventbenefit",
+)
+EXCLUDED_REWARD_URL_PREFIXES = (
+    "https://ofw.adison.co",
 )
 NAVERPAY_MAIN_URL = "https://point.pay.naver.com/pc/main"
 NAVERPAY_MISSION_DETAIL_URL = "https://point.pay.naver.com/pc/mission-detail?dataType=category&rank=20&pageKey=all"
@@ -45,6 +47,10 @@ _login_loop_lock = threading.Lock()
 
 
 Base = declarative_base()
+
+
+class ExcludedRewardUrl(Exception):
+    pass
 
 
 class CampaignUrl(Base):
@@ -180,6 +186,7 @@ def parse_accounts(ids_text: str, passwords_text: str) -> list[AccountConfig]:
 
 
 def run_sync(config: RunConfig, log: Optional[Callable[[str], None]] = None) -> RunResult:
+    _cleanup_login_sessions_sync(log=log)
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -239,7 +246,7 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
         try:
             emit("Campaign URL collection started")
             emit(f"Proxy mode login={mask_proxy_url(config.login_proxy_url)} reward={mask_proxy_url(config.reward_proxy_url)}")
-            collected_urls = await save_naver_campaign_urls(
+            collected_urls, existing_collected_urls = await save_naver_campaign_urls(
                 session_db,
                 emit,
                 config.reward_proxy_url,
@@ -249,6 +256,7 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
             )
             result.collected_url_count = len(collected_urls)
             emit(f"Campaign URL collection finished: {result.collected_url_count}")
+            new_collected_urls = collected_urls - existing_collected_urls
 
             for account in config.accounts:
                 account_result = await process_account(
@@ -258,6 +266,8 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
                     config.reward_proxy_url,
                     emit,
                     config.login_proxy_url,
+                    new_collected_urls,
+                    len(existing_collected_urls),
                 )
                 result.estimated_points += account_result.estimated_points
                 result.skipped_url_count += account_result.skipped_url_count
@@ -391,6 +401,7 @@ def run_manual_link_sync(
     log: Optional[Callable[[str], None]] = None,
     login_proxy_url: str = "",
 ):
+    _cleanup_login_sessions_sync(log=log)
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -788,8 +799,9 @@ def _run_async(coro):
 def _get_login_loop():
     global _login_loop
     with _login_loop_lock:
-        if _login_loop and _login_loop.is_running():
+        if _login_loop and not _login_loop.is_closed() and _login_loop.is_running():
             return _login_loop
+        _login_loop = None
         loop = asyncio.new_event_loop()
 
         def run_loop():
@@ -803,8 +815,14 @@ def _get_login_loop():
 
 
 def _run_login_async(coro):
-    future = asyncio.run_coroutine_threadsafe(coro, _get_login_loop())
-    return future.result()
+    global _login_loop
+    try:
+        future = asyncio.run_coroutine_threadsafe(coro, _get_login_loop())
+        return future.result()
+    except RuntimeError:
+        with _login_loop_lock:
+            _login_loop = None
+        raise
 
 
 async def _close_login_session(user_id: str):
@@ -839,6 +857,14 @@ async def _cleanup_login_sessions():
                 expired.append(user_id)
     for user_id in expired:
         await _close_login_session(user_id)
+
+
+def _cleanup_login_sessions_sync(log: Optional[Callable[[str], None]] = None):
+    try:
+        _run_login_async(_cleanup_login_sessions())
+    except Exception as exc:
+        if log:
+            log(f"login session cleanup skipped: {exc}")
 
 
 async def _login_screenshot_payload(page) -> str:
@@ -1138,13 +1164,64 @@ async def click_and_dwell(page, locator, dwell_seconds: float, user_id: str, emi
         await active_page.bring_to_front()
     except Exception:
         pass
+    if is_excluded_reward_url(active_page.url):
+        emit(f"{user_id}: excluded reward URL - {active_page.url}")
+        return active_page
+    ready_wait = await wait_for_dwell_ready(active_page)
+    dwell_started_at = time.monotonic()
     await asyncio.sleep(dwell_seconds)
-    emit(f"{user_id}: visited {active_page.url}")
+    actual_dwell = time.monotonic() - dwell_started_at
+    emit_visited(user_id, active_page.url, emit, dwell_seconds=dwell_seconds, actual_dwell=actual_dwell, ready_wait=ready_wait)
     try:
         await campaign_page_diagnostic(active_page, user_id, f"{label} after dwell", emit)
     except Exception as e:
         emit(f"{user_id}: {label} diagnostic skipped after dwell - {e}")
     return active_page
+
+
+async def wait_for_dwell_ready(page) -> float:
+    if "live-view.html" not in str(page.url or ""):
+        return 0.0
+    started_at = time.monotonic()
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass
+    try:
+        await page.wait_for_load_state("load", timeout=8000)
+    except Exception:
+        pass
+    try:
+        await page.wait_for_load_state("networkidle", timeout=8000)
+    except Exception:
+        pass
+    try:
+        await page.locator("body").wait_for(state="visible", timeout=5000)
+    except Exception:
+        pass
+    try:
+        await page.evaluate(
+            """() => new Promise(resolve => {
+                requestAnimationFrame(() => requestAnimationFrame(resolve));
+            })"""
+        )
+    except Exception:
+        pass
+    return time.monotonic() - started_at
+
+
+def emit_visited(user_id: str, url: str, emit: Callable[[str], None], dwell_seconds: Optional[float] = None, actual_dwell: Optional[float] = None, ready_wait: Optional[float] = None):
+    if is_excluded_reward_url(url):
+        emit(f"{user_id}: excluded reward URL - {url}")
+        return
+    message = f"{user_id}: visited {url}"
+    if "live-view.html" in str(url or "") and actual_dwell is not None:
+        message += f" dwell={actual_dwell:.1f}s"
+        if dwell_seconds is not None:
+            message += f" planned={float(dwell_seconds):.1f}s"
+        if ready_wait:
+            message += f" ready_wait={ready_wait:.1f}s"
+    emit(message)
 
 
 async def process_campaign2_link(page, link: str, session_db, user_id: str, emit: Callable[[str], None]):
@@ -1176,6 +1253,8 @@ async def process_campaign2_link(page, link: str, session_db, user_id: str, emit
         dwell_seconds = required_dwell + 3
         try:
             await click_campaign2_point_button_and_dwell(page, dwell_seconds, user_id, emit)
+        except ExcludedRewardUrl as e:
+            return DetailResult(user_id=user_id, url=link, status="skipped", message=str(e))
         except Exception:
             await campaign_page_diagnostic(page, user_id, "campaign2 point button click failed", emit)
             raise
@@ -1238,8 +1317,14 @@ async def click_campaign2_point_button_and_dwell(page, dwell_seconds: float, use
         await active_page.bring_to_front()
     except Exception:
         pass
+    if is_excluded_reward_url(active_page.url):
+        emit(f"{user_id}: excluded reward URL - {active_page.url}")
+        raise ExcludedRewardUrl("excluded reward URL")
+    ready_wait = await wait_for_dwell_ready(active_page)
+    dwell_started_at = time.monotonic()
     await asyncio.sleep(dwell_seconds)
-    emit(f"{user_id}: visited {active_page.url}")
+    actual_dwell = time.monotonic() - dwell_started_at
+    emit_visited(user_id, active_page.url, emit, dwell_seconds=dwell_seconds, actual_dwell=actual_dwell, ready_wait=ready_wait)
     return active_page
 
 
@@ -1349,8 +1434,15 @@ async def handle_pincrux_short_live_cards(page, user_id: str, emit: Callable[[st
             except Exception:
                 pass
             active_page = await follow_pincrux_note_reward_button(active_page, seconds)
-            await asyncio.sleep(seconds + 3)
-            emit(f"{user_id}: visited {active_page.url}")
+            if is_excluded_reward_url(active_page.url):
+                emit(f"{user_id}: excluded reward URL - {active_page.url}")
+                continue
+            dwell_seconds = seconds + 3
+            ready_wait = await wait_for_dwell_ready(active_page)
+            dwell_started_at = time.monotonic()
+            await asyncio.sleep(dwell_seconds)
+            actual_dwell = time.monotonic() - dwell_started_at
+            emit_visited(user_id, active_page.url, emit, dwell_seconds=dwell_seconds, actual_dwell=actual_dwell, ready_wait=ready_wait)
             visited += 1
             if work_page is None and active_page is not page:
                 try:
@@ -1501,6 +1593,8 @@ def ppomppu_target_url(link: str) -> str:
 
 
 async def visit_campaign_url(page, link: str, session_db, user_id: str, emit: Callable[[str], None]):
+    if is_excluded_reward_url(link):
+        return DetailResult(user_id=user_id, url=link, status="skipped", message="excluded reward URL")
     if link.startswith("https://campaign2"):
         return await process_campaign2_link(page, link, session_db, user_id, emit)
 
@@ -1513,6 +1607,9 @@ async def visit_campaign_url(page, link: str, session_db, user_id: str, emit: Ca
         await page.wait_for_load_state("networkidle", timeout=5000)
     except Exception:
         pass
+    if is_excluded_reward_url(page.url):
+        emit(f"{user_id}: excluded reward URL - {page.url}")
+        return DetailResult(user_id=user_id, url=link, status="skipped", message="excluded reward URL")
     emit(f"{user_id}: visited {page.url}")
     if page.url.startswith("https://campaign2"):
         return await process_campaign2_link(page, page.url, session_db, user_id, emit)
@@ -1535,7 +1632,11 @@ async def handle_naverpay_mission_detail(page, link: str, session_db, user_id: s
     for row in rows[:40]:
         href = str(row.get("href") or "")
         target_id = str(row.get("id") or "")
+        row_seconds = max(1, int(row.get("seconds") or 5))
         if not href and not target_id:
+            continue
+        if is_excluded_reward_url(href):
+            emit(f"{user_id}: excluded reward URL - {href}")
             continue
         work_page = None
         try:
@@ -1559,14 +1660,30 @@ async def handle_naverpay_mission_detail(page, link: str, session_db, user_id: s
                 await active_page.wait_for_load_state("domcontentloaded", timeout=5000)
             except Exception:
                 pass
+            try:
+                await active_page.bring_to_front()
+            except Exception:
+                pass
             await wait_for_bridge_redirect(active_page)
+            if is_excluded_reward_url(active_page.url):
+                emit(f"{user_id}: excluded reward URL - {active_page.url}")
+                if work_page is None and active_page is not page:
+                    try:
+                        await active_page.close()
+                    except Exception:
+                        pass
+                continue
             if active_page.url.startswith("https://campaign2"):
                 detail = await process_campaign2_link(active_page, active_page.url, session_db, user_id, emit)
                 if detail.status not in ("skipped", "unavailable", "no_url", "error"):
                     visited += 1
             else:
-                await asyncio.sleep(4)
-                emit(f"{user_id}: visited {active_page.url}")
+                dwell_seconds = row_seconds + 3 if "live-view.html" in active_page.url else 4
+                ready_wait = await wait_for_dwell_ready(active_page)
+                dwell_started_at = time.monotonic()
+                await asyncio.sleep(dwell_seconds)
+                actual_dwell = time.monotonic() - dwell_started_at
+                emit_visited(user_id, active_page.url, emit, dwell_seconds=dwell_seconds, actual_dwell=actual_dwell, ready_wait=ready_wait)
                 visited += 1
             if work_page is None and active_page is not page:
                 try:
@@ -1653,10 +1770,11 @@ async def collect_naverpay_mission_reward_rows(page):
                     el.dataset.naverpaperMissionId = String(candidates.length + 1);
                 }
                 const href = el.href || '';
+                const secondsMatch = text.match(/(\\d+)\\s*ì´ˆ/);
                 const key = href || el.dataset.naverpaperMissionId || text;
                 if (seen.has(key)) continue;
                 seen.add(key);
-                candidates.push({ id: el.dataset.naverpaperMissionId, href, text });
+                candidates.push({ id: el.dataset.naverpaperMissionId, href, text, seconds: secondsMatch ? Number(secondsMatch[1] || 5) : 5 });
             }
             return candidates;
         }"""
@@ -1667,6 +1785,10 @@ async def process_campaign_links(page, campaign_links, session_db, user_id: str,
     details = []
     for link in campaign_links:
         try:
+            if is_excluded_reward_url(link):
+                emit(f"{user_id}: excluded reward URL - {link}")
+                details.append(DetailResult(user_id=user_id, url=link, status="skipped", message="excluded reward URL"))
+                continue
             if link.startswith("https://campaign2"):
                 detail = await process_campaign2_link(page, link, session_db, user_id, emit)
             elif link.startswith("https://s.ppomppu.co.kr"):
@@ -1684,6 +1806,11 @@ async def process_campaign_links(page, campaign_links, session_db, user_id: str,
                 target_url = redirected_url
                 if redirected_url.startswith("https://s.ppomppu.co.kr") and fallback_url:
                     target_url = fallback_url
+                if is_excluded_reward_url(target_url):
+                    detail = DetailResult(user_id=user_id, url=link, status="skipped", message="excluded reward URL")
+                    emit(f"{user_id}: excluded reward URL - {target_url}")
+                    details.append(detail)
+                    continue
                 if target_url.startswith("https://campaign2"):
                     detail = await process_campaign2_link(page, target_url, session_db, user_id, emit)
                 else:
@@ -1747,13 +1874,20 @@ async def process_account(
     reward_proxy_url: str,
     emit: Callable[[str], None],
     login_proxy_url: str = "",
+    candidate_urls: Optional[set[str]] = None,
+    existing_collected_count: int = 0,
 ) -> AccountResult:
     from playwright.async_api import async_playwright
     from playwright_stealth import Stealth
 
     result = AccountResult(user_id=account.user_id)
-    campaign_links, already_visited_count = await fetch_naver_campaign_urls(session_db, account.user_id)
-    result.skipped_url_count = already_visited_count
+    result.skipped_url_count = int(existing_collected_count or 0)
+    if result.skipped_url_count:
+        emit(f"{account.user_id}: skipped existing collected URLs={result.skipped_url_count}")
+    campaign_links, already_visited_count = await fetch_naver_campaign_urls(session_db, account.user_id, candidate_urls)
+    if already_visited_count:
+        emit(f"{account.user_id}: excluded previously visited URLs={already_visited_count}")
+        result.skipped_url_count += already_visited_count
     if not campaign_links:
         return result
 
@@ -1958,7 +2092,7 @@ async def process_clien_url(url, soup, session, collected_urls, emit, proxy_url:
         inner_soup = BeautifulSoup(await fetch(full_link, session, proxy_url), "html.parser")
         for a_tag in inner_soup.find_all("a", href=True):
             href = a_tag["href"]
-            if (href.startswith("https://campaign2.naver.com") or href.startswith("https://ofw.adison.co")) and len(href) > 40:
+            if href.startswith("https://campaign2.naver.com") and len(href) > 40:
                 add_reward_url(collected_urls, href)
 
 
@@ -1980,12 +2114,18 @@ async def process_ppomppu_url(url, soup, session, collected_urls, emit, proxy_ur
 
 
 def is_reward_url(href: str) -> bool:
+    if is_excluded_reward_url(href):
+        return False
     if not href or not href.startswith(REWARD_URL_PREFIXES) or len(href) <= 40:
         return False
     if href.startswith("https://campaign2.naver.com"):
         event_id = (parse_qs(urlparse(href).query).get("eventId") or [""])[0]
         return len(event_id) >= 10
     return True
+
+
+def is_excluded_reward_url(href: str) -> bool:
+    return str(href or "").strip().startswith(EXCLUDED_REWARD_URL_PREFIXES)
 
 
 def canonical_reward_url(href: str) -> str:
@@ -2028,7 +2168,7 @@ def extract_campaign_urls_from_html(html: str) -> list[str]:
     )
     urls = []
     seen = set()
-    pattern = r"https://(?:campaign2\.naver\.com|ofw\.adison\.co|external-token\.pay\.naver\.com|point\.pay\.naver\.com/bridge/eventbenefit)[^\"'<>\\\s]+"
+    pattern = r"https://(?:campaign2\.naver\.com|external-token\.pay\.naver\.com|point\.pay\.naver\.com/bridge/eventbenefit)[^\"'<>\\\s]+"
     for match in re.finditer(pattern, normalized):
         href = canonical_reward_url(match.group(0).rstrip(").,"))
         if is_reward_url(href) and href not in seen:
@@ -2395,18 +2535,30 @@ async def save_naver_campaign_urls(
         except Exception as e:
             emit(f"{NAVERPAY_MAIN_URL}: collection error for {account.user_id} - {e}")
 
+    existing_collected_urls = set()
     for link in collected_urls:
+        if is_excluded_reward_url(link):
+            continue
         existing_url = session_db.query(CampaignUrl).filter_by(url=link).first()
-        if not existing_url:
+        if existing_url:
+            existing_collected_urls.add(link)
+        else:
             session_db.add(CampaignUrl(url=link))
-    return collected_urls
+    return collected_urls, existing_collected_urls
 
 
-async def fetch_naver_campaign_urls(session_db, nid: str):
+async def fetch_naver_campaign_urls(session_db, nid: str, candidate_urls: Optional[set[str]] = None):
     campaign_links = set()
     already_visited_count = 0
-    available_urls = session_db.query(CampaignUrl).filter_by(is_available=True).all()
+    query = session_db.query(CampaignUrl).filter_by(is_available=True)
+    if candidate_urls is not None:
+        if not candidate_urls:
+            return campaign_links, already_visited_count
+        query = query.filter(CampaignUrl.url.in_(candidate_urls))
+    available_urls = query.all()
     for url_obj in available_urls:
+        if is_excluded_reward_url(url_obj.url):
+            continue
         if should_revisit_url(url_obj.url):
             campaign_links.add(url_obj.url)
             continue
@@ -2441,15 +2593,7 @@ def recent_runs(db_path: str, limit: int = 30):
     db.create_all()
     with db.get_session() as session:
         rows = session.query(RunHistory).order_by(RunHistory.id.desc()).limit(limit).all()
-        data = []
-        for row in rows:
-            skipped_count = (
-                session.query(RunDetail)
-                .filter(RunDetail.run_id == row.id, RunDetail.status.in_(["skipped", "unavailable", "no_url"]))
-                .count()
-            )
-            data.append(_history_to_dict(row, skipped_count))
-        return data
+        return [_history_to_dict(row) for row in rows]
 
 
 def run_details(db_path: str, run_id: int):
@@ -2480,8 +2624,7 @@ def cookie_statuses(db_path: str, cookie_dir: str, accounts: list[AccountConfig]
     return rows
 
 
-def _history_to_dict(row: RunHistory, skipped_count: int = 0):
-    total_skipped = getattr(row, "skipped_url_count", 0) or skipped_count
+def _history_to_dict(row: RunHistory):
     return {
         "id": row.id,
         "started_at": _fmt(row.started_at),
@@ -2489,7 +2632,7 @@ def _history_to_dict(row: RunHistory, skipped_count: int = 0):
         "status": row.status,
         "account_count": row.account_count,
         "collected_url_count": row.collected_url_count,
-        "skipped_url_count": total_skipped,
+        "skipped_url_count": row.skipped_url_count or 0,
         "visited_url_count": row.visited_url_count,
         "estimated_points": row.estimated_points,
         "message": row.message or "",

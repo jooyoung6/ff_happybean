@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
 
+{% if arg.get('dependency_error') %}
+<div class="alert alert-warning">Required packages are missing. Open the package install menu and install all required packages. ({{ arg['dependency_error'] }})</div>
+{% endif %}
+
 {{ macros.m_button_group([['globalSettingSaveBtn', '설정 저장'], ['run_now_btn', '지금 실행']]) }}
 {{ macros.m_row_start('5') }}
 {{ macros.m_row_end() }}

@@ -11,7 +11,26 @@ from importlib import metadata
 from flask import jsonify, render_template
 
 from .setup import *
-from . import source_naverpaper as NP
+
+
+NP = None
+NP_IMPORT_ERROR = None
+SOURCE_NOT_AVAILABLE = object()
+
+
+def _load_source_module():
+    global NP, NP_IMPORT_ERROR
+    if NP is not None:
+        return NP
+    try:
+        from . import source_naverpaper as module
+
+        NP = module
+        NP_IMPORT_ERROR = None
+        return NP
+    except Exception as e:
+        NP_IMPORT_ERROR = e
+        raise
 
 
 class ModuleMain(PluginModuleBase):
@@ -26,6 +45,8 @@ class ModuleMain(PluginModuleBase):
     install_jobs_lock = threading.Lock()
     collection_lock = threading.Lock()
     collection_running = False
+
+    SOURCE_DEPENDENCY_KEYS = ("aiohttp", "beautifulsoup4", "playwright", "playwright-stealth", "SQLAlchemy")
 
     def __init__(self, P):
         super(ModuleMain, self).__init__(P, name="main", first_menu="setting", scheduler_desc="NaverPaper")
@@ -45,6 +66,7 @@ class ModuleMain(PluginModuleBase):
             "proxy_login_enabled": "False",
             "proxy_url": "",
         }
+        self._source_warning_logged = False
 
     def plugin_load(self):
         try:
@@ -53,6 +75,36 @@ class ModuleMain(PluginModuleBase):
         except Exception as e:
             P.logger.error(f"Exception:{str(e)}")
             P.logger.error(traceback.format_exc())
+
+    def _np(self):
+        return _load_source_module()
+
+    def _try_np(self):
+        try:
+            module = self._np()
+            self._source_warning_logged = False
+            return module
+        except Exception:
+            if not self._source_warning_logged:
+                P.logger.warning("[NaverPaper] source module is not available. Install required packages first.")
+                P.logger.warning(traceback.format_exc())
+                self._source_warning_logged = True
+            return None
+
+    def _source_dependency_message(self):
+        missing = [item["key"] for item in self.PYTHON_PACKAGES if item["key"] in self.SOURCE_DEPENDENCY_KEYS and not self._is_dependency_installed(item["key"])]
+        if missing:
+            return "Required Python packages are missing: %s. Install them from the package install menu." % ", ".join(missing)
+        if NP_IMPORT_ERROR:
+            return str(NP_IMPORT_ERROR)
+        return "Source module is not available. Check the log and package install menu."
+
+    def _source_dependency_warning(self):
+        try:
+            self._np()
+            return None
+        except Exception:
+            return {"ret": "warning", "msg": self._source_dependency_message()}
 
     def process_menu(self, sub, req):
         arg = P.ModelSetting.to_dict()
@@ -63,20 +115,28 @@ class ModuleMain(PluginModuleBase):
         arg["db_path"] = self._db_path()
         arg["cookie_dir"] = self._cookie_dir()
         arg["package_name"] = P.package_name
-        accounts = self._accounts()
-        arg["accounts"] = accounts
-        arg["profiles"] = self._profiles()
-        arg["profiles_json"] = json.dumps(arg["profiles"], ensure_ascii=False)
-        arg["cookie_statuses"] = NP.cookie_statuses(self._db_path(), self._cookie_dir(), accounts)
         if sub == "install":
+            arg["accounts"] = []
+            arg["profiles"] = []
+            arg["profiles_json"] = "[]"
+            arg["cookie_statuses"] = []
             arg["install_status"] = self._dependency_status()
+            return render_template(f"{P.package_name}_{self.name}_{sub}.html", arg=arg)
+        np_module = self._try_np()
+        if np_module is None:
+            arg["dependency_error"] = self._source_dependency_message()
+        accounts = self._accounts(np_module)
+        arg["accounts"] = accounts
+        arg["profiles"] = self._profiles(np_module)
+        arg["profiles_json"] = json.dumps(arg["profiles"], ensure_ascii=False)
+        arg["cookie_statuses"] = np_module.cookie_statuses(self._db_path(), self._cookie_dir(), accounts) if np_module else []
         if sub == "result":
-            arg["runs"] = NP.recent_runs(self._db_path(), 50)
+            arg["runs"] = np_module.recent_runs(self._db_path(), 50) if np_module else []
             arg["details"] = []
             run_id = str(req.args.get("run_id") or "").strip()
-            if run_id.isdigit():
+            if np_module and run_id.isdigit():
                 arg["selected_run_id"] = int(run_id)
-                arg["details"] = NP.run_details(self._db_path(), int(run_id))
+                arg["details"] = np_module.run_details(self._db_path(), int(run_id))
             else:
                 arg["selected_run_id"] = None
         return render_template(f"{P.package_name}_{self.name}_{sub}.html", arg=arg)
@@ -90,10 +150,16 @@ class ModuleMain(PluginModuleBase):
             if command == "sync_scheduler":
                 return jsonify(self._sync_scheduler(arg1, arg2))
             if command == "result_details":
+                warning = self._source_dependency_warning()
+                if warning:
+                    return jsonify(warning)
                 run_id = int(str(arg1 or "0").strip() or "0")
-                return jsonify({"ret": "success", "data": NP.run_details(self._db_path(), run_id)})
+                return jsonify({"ret": "success", "data": self._np().run_details(self._db_path(), run_id)})
             if command == "cookie_status":
-                return jsonify({"ret": "success", "data": NP.cookie_statuses(self._db_path(), self._cookie_dir(), self._accounts())})
+                warning = self._source_dependency_warning()
+                if warning:
+                    return jsonify(warning)
+                return jsonify({"ret": "success", "data": self._np().cookie_statuses(self._db_path(), self._cookie_dir(), self._accounts())})
             if command == "profile_save":
                 return jsonify(self._profile_save(arg1))
             if command == "profile_save_all":
@@ -107,7 +173,10 @@ class ModuleMain(PluginModuleBase):
             if command == "profile_submit_captcha":
                 return jsonify(self._profile_submit_captcha(arg1, arg2))
             if command == "profile_login_session_close":
-                NP.close_login_session_sync(arg1)
+                warning = self._source_dependency_warning()
+                if warning:
+                    return jsonify(warning)
+                self._np().close_login_session_sync(arg1)
                 return jsonify({"ret": "success", "msg": "login session closed"})
             if command == "profile_list":
                 return jsonify({"ret": "success", "data": self._profile_rows()})
@@ -138,6 +207,9 @@ class ModuleMain(PluginModuleBase):
             self._mark_collection_finished()
 
     def _start_run_now_background(self):
+        warning = self._source_dependency_warning()
+        if warning:
+            return warning
         if not self._accounts():
             return {"ret": "warning", "msg": "Naver account profile is empty"}
         if not self._mark_collection_running():
@@ -163,6 +235,9 @@ class ModuleMain(PluginModuleBase):
             self._mark_collection_finished()
 
     def _start_manual_reward_background(self, link):
+        warning = self._source_dependency_warning()
+        if warning:
+            return warning
         link = str(link or "").strip()
         if not link:
             return {"ret": "warning", "msg": "링크를 입력하세요."}
@@ -178,7 +253,8 @@ class ModuleMain(PluginModuleBase):
 
     def _manual_reward_background(self, link):
         try:
-            result = NP.run_manual_link_sync(
+            np_module = self._np()
+            result = np_module.run_manual_link_sync(
                 self._db_path(),
                 self._cookie_dir(),
                 self._accounts(),
@@ -212,11 +288,12 @@ class ModuleMain(PluginModuleBase):
             self.collection_running = False
 
     def _run_now(self):
+        np_module = self._np()
         self._ensure_dirs()
         accounts = self._accounts()
         if not accounts:
             raise ValueError("Naver account profile is empty")
-        config = NP.RunConfig(
+        config = np_module.RunConfig(
             db_path=self._db_path(),
             cookie_dir=self._cookie_dir(),
             accounts=accounts,
@@ -226,7 +303,7 @@ class ModuleMain(PluginModuleBase):
             keep_campaign_days=self._int_setting("keep_campaign_days", 60),
             keep_user_days=self._int_setting("keep_user_days", 7),
         )
-        return NP.run_sync(config, log=lambda msg: P.logger.info(f"[NaverPaper] {msg}"))
+        return np_module.run_sync(config, log=lambda msg: P.logger.info(f"[NaverPaper] {msg}"))
 
     def _sync_scheduler(self, enabled_override=None, schedule_override=None):
         if enabled_override is not None:
@@ -248,11 +325,15 @@ class ModuleMain(PluginModuleBase):
     def _job_id(self):
         return f"{P.package_name}_collection"
 
-    def _accounts(self):
-        profiles = self._profiles()
+    def _accounts(self, np_module=SOURCE_NOT_AVAILABLE):
+        if np_module is SOURCE_NOT_AVAILABLE:
+            np_module = self._try_np()
+        profiles = self._profiles(np_module)
         if profiles:
+            if not np_module:
+                return [item for item in profiles if item.get("user_id")]
             return [
-                NP.AccountConfig(
+                np_module.AccountConfig(
                     user_id=item.get("user_id", ""),
                     password=item.get("password", ""),
                     keep_login=self._profile_bool(item.get("keep_login"), True),
@@ -260,9 +341,11 @@ class ModuleMain(PluginModuleBase):
                 for item in profiles
                 if item.get("user_id")
             ]
-        return NP.parse_accounts(P.ModelSetting.get("naver_ids"), P.ModelSetting.get("naver_passwords"))
+        if np_module:
+            return np_module.parse_accounts(P.ModelSetting.get("naver_ids"), P.ModelSetting.get("naver_passwords"))
+        return self._parse_accounts_fallback(P.ModelSetting.get("naver_ids"), P.ModelSetting.get("naver_passwords"))
 
-    def _profiles(self):
+    def _profiles(self, np_module=SOURCE_NOT_AVAILABLE):
         raw = P.ModelSetting.get("naver_profiles") or "[]"
         try:
             data = json.loads(raw)
@@ -271,9 +354,20 @@ class ModuleMain(PluginModuleBase):
         except Exception:
             pass
         legacy = []
-        for account in NP.parse_accounts(P.ModelSetting.get("naver_ids"), P.ModelSetting.get("naver_passwords")):
-            legacy.append({"user_id": account.user_id, "password": account.password, "keep_login": True, "nid_aut": "", "nid_ses": "", "nid_jst": ""})
+        if np_module is SOURCE_NOT_AVAILABLE:
+            np_module = self._try_np()
+        accounts = np_module.parse_accounts(P.ModelSetting.get("naver_ids"), P.ModelSetting.get("naver_passwords")) if np_module else self._parse_accounts_fallback(P.ModelSetting.get("naver_ids"), P.ModelSetting.get("naver_passwords"))
+        for account in accounts:
+            legacy.append({"user_id": account.user_id if hasattr(account, "user_id") else account.get("user_id", ""), "password": account.password if hasattr(account, "password") else account.get("password", ""), "keep_login": True, "nid_aut": "", "nid_ses": "", "nid_jst": ""})
         return legacy
+
+    def _parse_accounts_fallback(self, ids_text, passwords_text):
+        ids = [line.strip() for line in str(ids_text or "").replace(",", "\n").splitlines() if line.strip()]
+        passwords = [line.strip() for line in str(passwords_text or "").replace(",", "\n").splitlines()]
+        rows = []
+        for idx, user_id in enumerate(ids):
+            rows.append({"user_id": user_id, "password": passwords[idx] if idx < len(passwords) else "", "keep_login": True})
+        return rows
 
     def _normalize_profile(self, item):
         item = item if isinstance(item, dict) else {}
@@ -287,7 +381,11 @@ class ModuleMain(PluginModuleBase):
         }
 
     def _profile_rows(self):
-        return {"profiles": self._profiles(), "cookie_statuses": NP.cookie_statuses(self._db_path(), self._cookie_dir(), self._accounts())}
+        np_module = self._try_np()
+        return {
+            "profiles": self._profiles(np_module),
+            "cookie_statuses": np_module.cookie_statuses(self._db_path(), self._cookie_dir(), self._accounts(np_module)) if np_module else [],
+        }
 
     def _profile_save(self, payload):
         try:
@@ -344,6 +442,13 @@ class ModuleMain(PluginModuleBase):
         return {"ret": "success", "msg": "profiles saved", "data": self._profile_rows()}
 
     def _profile_refresh_cookie(self, user_id):
+        block = self._collection_login_block_message()
+        if block:
+            return block
+        warning = self._source_dependency_warning()
+        if warning:
+            return warning
+        np_module = self._np()
         user_id = str(user_id or "").strip()
         profile = None
         for item in self._profiles():
@@ -354,8 +459,8 @@ class ModuleMain(PluginModuleBase):
             return {"ret": "warning", "msg": "profile not found"}
         if not profile.get("password"):
             return {"ret": "warning", "msg": "password is empty; enter cookies manually"}
-        result = NP.refresh_cookie_sync(
-            NP.AccountConfig(user_id=profile["user_id"], password=profile.get("password", ""), keep_login=self._profile_bool(profile.get("keep_login"), True)),
+        result = np_module.refresh_cookie_sync(
+            np_module.AccountConfig(user_id=profile["user_id"], password=profile.get("password", ""), keep_login=self._profile_bool(profile.get("keep_login"), True)),
             self._cookie_dir(),
             self._login_proxy_url(),
             log=lambda msg: P.logger.info(f"[NaverPaper] {msg}"),
@@ -374,30 +479,45 @@ class ModuleMain(PluginModuleBase):
         return {"ret": "success", "msg": "cookie refreshed", "data": self._profile_rows()}
 
     def _profile_login_screen(self, user_id):
+        block = self._collection_login_block_message()
+        if block:
+            return block
+        warning = self._source_dependency_warning()
+        if warning:
+            return warning
+        np_module = self._np()
         profile = self._find_profile(user_id)
         if not profile:
             return {"ret": "warning", "msg": "profile not found"}
         if not profile.get("password"):
             return {"ret": "warning", "msg": "password is empty"}
-        result = NP.open_login_screen_sync(
-            NP.AccountConfig(user_id=profile["user_id"], password=profile.get("password", ""), keep_login=self._profile_bool(profile.get("keep_login"), True)),
+        result = np_module.open_login_screen_sync(
+            np_module.AccountConfig(user_id=profile["user_id"], password=profile.get("password", ""), keep_login=self._profile_bool(profile.get("keep_login"), True)),
             self._cookie_dir(),
             self._login_proxy_url(),
             log=lambda msg: P.logger.info(f"[NaverPaper] {msg}"),
         )
         if result.get("cookies"):
             self._merge_profile_cookies(profile, result.get("cookies") or {})
+            self._close_profile_login_session(profile["user_id"], np_module)
             result["data"] = self._profile_rows()
         return result
 
     def _profile_submit_captcha(self, user_id, captcha_text):
+        block = self._collection_login_block_message()
+        if block:
+            return block
+        warning = self._source_dependency_warning()
+        if warning:
+            return warning
+        np_module = self._np()
         profile = self._find_profile(user_id)
         if not profile:
             return {"ret": "warning", "msg": "profile not found"}
         if not profile.get("password"):
             return {"ret": "warning", "msg": "password is empty"}
-        screen = NP.open_login_screen_sync(
-            NP.AccountConfig(user_id=profile["user_id"], password=profile.get("password", ""), keep_login=self._profile_bool(profile.get("keep_login"), True)),
+        screen = np_module.open_login_screen_sync(
+            np_module.AccountConfig(user_id=profile["user_id"], password=profile.get("password", ""), keep_login=self._profile_bool(profile.get("keep_login"), True)),
             self._cookie_dir(),
             self._login_proxy_url(),
             log=lambda msg: P.logger.info(f"[NaverPaper] {msg}"),
@@ -406,9 +526,10 @@ class ModuleMain(PluginModuleBase):
             return screen
         if screen.get("cookies"):
             self._merge_profile_cookies(profile, screen.get("cookies") or {})
+            self._close_profile_login_session(profile["user_id"], np_module)
             screen["data"] = self._profile_rows()
             return screen
-        result = NP.submit_login_captcha_sync(
+        result = np_module.submit_login_captcha_sync(
             profile["user_id"],
             captcha_text,
             self._cookie_dir(),
@@ -416,6 +537,7 @@ class ModuleMain(PluginModuleBase):
         )
         if result.get("cookies"):
             self._merge_profile_cookies(profile, result.get("cookies") or {})
+            self._close_profile_login_session(profile["user_id"], np_module)
             result["data"] = self._profile_rows()
         return result
 
@@ -426,6 +548,13 @@ class ModuleMain(PluginModuleBase):
                 return item
         return None
 
+    def _collection_login_block_message(self):
+        with self.collection_lock:
+            running = self.collection_running
+        if running:
+            return {"ret": "warning", "msg": "현재 수집중입니다. 수집이 완료되면 로그인 해 주세요"}
+        return None
+
     def _merge_profile_cookies(self, profile, cookies):
         profile["nid_aut"] = cookies.get("NID_AUT", profile.get("nid_aut", ""))
         profile["nid_ses"] = cookies.get("NID_SES", profile.get("nid_ses", ""))
@@ -434,6 +563,14 @@ class ModuleMain(PluginModuleBase):
         profiles.append(profile)
         profiles.sort(key=lambda x: x.get("user_id", ""))
         P.ModelSetting.set("naver_profiles", json.dumps(profiles, ensure_ascii=False))
+
+    def _close_profile_login_session(self, user_id, np_module=None):
+        try:
+            module = np_module or self._np()
+            module.close_login_session_sync(user_id)
+        except Exception:
+            P.logger.warning("[NaverPaper] failed to close login session for %s", user_id)
+            P.logger.warning(traceback.format_exc())
 
     def _profile_delete(self, user_id):
         user_id = str(user_id or "").strip()
@@ -495,7 +632,7 @@ class ModuleMain(PluginModuleBase):
             return {}
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return NP.storage_cookie_values(json.load(f))
+                return self._np().storage_cookie_values(json.load(f))
         except Exception:
             return {}
 
@@ -577,18 +714,30 @@ class ModuleMain(PluginModuleBase):
         return False
 
     def _chromium_status(self):
+        spec = "python -m playwright install --with-deps chromium"
         try:
-            from playwright.sync_api import sync_playwright
-
-            with sync_playwright() as playwright:
-                path = playwright.chromium.executable_path
+            code = (
+                "from playwright.sync_api import sync_playwright\n"
+                "with sync_playwright() as p:\n"
+                "    print(p.chromium.executable_path or '')\n"
+            )
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            path = (proc.stdout or "").strip().splitlines()[-1] if proc.stdout.strip() else ""
+            message = (proc.stderr or "").strip()
+            installed = bool(path and os.path.exists(path))
             return {
                 "key": "chromium",
                 "name": "Playwright Chromium",
-                "installed": bool(path and os.path.exists(path)),
+                "installed": installed,
                 "version": "",
                 "path": path or "",
-                "spec": "python -m playwright install --with-deps chromium",
+                "spec": spec,
+                "message": "" if installed else (message or "Chromium executable was not found."),
             }
         except Exception as e:
             return {
@@ -597,7 +746,7 @@ class ModuleMain(PluginModuleBase):
                 "installed": False,
                 "version": "",
                 "path": "",
-                "spec": "python -m playwright install --with-deps chromium",
+                "spec": spec,
                 "message": str(e),
             }
 
