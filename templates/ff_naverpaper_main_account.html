@@ -9,13 +9,14 @@
 .np-page-actions {
   max-width: 1080px;
   margin: 0 auto 12px;
+  display: flex;
+  gap: 6px;
 }
 
 .np-profile-block {
   max-width: 1080px;
-  margin: 0 auto 28px;
-  padding-bottom: 24px;
-  border-bottom: 1px solid #e5e5e5;
+  margin: 0 auto;
+  padding-top: 16px;
 }
 
 .np-profile-title {
@@ -44,6 +45,22 @@
 
 .np-profile-header .np-profile-title {
   text-align: right;
+}
+
+.np-profile-tabs {
+  max-width: 1080px;
+  margin: 0 auto;
+}
+
+.np-profile-tabs .nav {
+  flex-wrap: wrap;
+}
+
+.np-profile-tabs .nav-link {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .np-actions {
@@ -178,6 +195,7 @@
 
 <div class="np-page-actions">
   <button type="button" id="localSettingSaveBtn" class="btn btn-sm btn-outline-primary">설정 저장</button>
+  <button type="button" id="profile_add_btn" class="btn btn-sm btn-outline-primary">프로필 추가</button>
 </div>
 
 {% set initial_profiles = arg['profiles'] if arg['profiles'] else [{'user_id':'', 'password':'', 'keep_login': True, 'nid_aut':'', 'nid_ses':'', 'nid_jst':''}] %}
@@ -185,17 +203,28 @@
 <form id="profile_setting" name="profile_setting">
   <input type="hidden" id="naver_profiles" name="naver_profiles" value='{{ arg["profiles_json"]|e }}'>
 
-  <div id="profile_blocks">
+  <div class="np-profile-tabs">
+    <nav>
+      <div class="nav nav-tabs" id="profile_tab_heads" role="tablist">
+        {% for profile in initial_profiles %}
+        <a class="nav-item nav-link {% if loop.first %}active{% endif %}" id="profile_tab_{{ loop.index0 }}" data-toggle="tab" href="#profile_pane_{{ loop.index0 }}" role="tab" data-profile-index="{{ loop.index0 }}">
+          프로필 {{ loop.index }}
+        </a>
+        {% endfor %}
+      </div>
+    </nav>
+  </div>
+
+  <div id="profile_blocks" class="tab-content">
     {% for profile in initial_profiles %}
-    <div class="np-profile-block profile-block" data-profile-index="{{ loop.index0 }}" data-original-id="{{ profile['user_id'] }}">
+    <div id="profile_pane_{{ loop.index0 }}" class="np-profile-block profile-block tab-pane fade {% if loop.first %}show active{% endif %}" role="tabpanel" data-profile-index="{{ loop.index0 }}" data-profile-order="{{ profile.get('profile_order') or loop.index }}" data-original-id="{{ profile['user_id'] }}">
       <div class="np-profile-layout">
         <div class="np-profile-form">
           <div class="np-profile-header">
             <div class="np-profile-title">프로필 {{ loop.index }}</div>
             <div class="np-actions">
-              <button type="button" id="profile_add_{{ loop.index0 }}" class="btn btn-sm btn-outline-primary">프로필 추가</button>
-              <button type="button" id="profile_delete_{{ loop.index0 }}" class="btn btn-sm btn-outline-primary">프로필 삭제</button>
               <button type="button" id="profile_captcha_submit_{{ loop.index0 }}" class="btn btn-sm btn-outline-primary">로그인</button>
+              <button type="button" id="profile_delete_{{ loop.index0 }}" class="btn btn-sm btn-outline-primary">프로필 삭제</button>
             </div>
           </div>
 
@@ -253,15 +282,14 @@
 <div id="profile_prototype" style="display:none;">
   {% set profile = {'user_id':'', 'password':'', 'keep_login': True, 'nid_aut':'', 'nid_ses':'', 'nid_jst':''} %}
   {% set idx = '__INDEX__' %}
-  <div class="np-profile-block profile-block" data-profile-index="__INDEX__" data-original-id="">
+  <div id="profile_pane___INDEX__" class="np-profile-block profile-block tab-pane fade" role="tabpanel" data-profile-index="__INDEX__" data-profile-order="0" data-original-id="">
     <div class="np-profile-layout">
       <div class="np-profile-form">
         <div class="np-profile-header">
           <div class="np-profile-title">프로필 __PROFILE_NO__</div>
           <div class="np-actions">
-            <button type="button" id="profile_add_{{ idx }}" class="btn btn-sm btn-outline-primary">프로필 추가</button>
-            <button type="button" id="profile_delete_{{ idx }}" class="btn btn-sm btn-outline-primary">프로필 삭제</button>
             <button type="button" id="profile_captcha_submit_{{ idx }}" class="btn btn-sm btn-outline-primary">로그인</button>
+            <button type="button" id="profile_delete_{{ idx }}" class="btn btn-sm btn-outline-primary">프로필 삭제</button>
           </div>
         </div>
 
@@ -328,6 +356,7 @@
 var cookieRows = {{ (arg.get('cookie_statuses') or []) | tojson }};
 var deletedProfileIds = [];
 var nextProfileIndex = {{ initial_profiles|length }};
+var nextProfileOrder = {{ initial_profiles|length + 1 }};
 var npImageZoom = 2;
 var isCollectionRunning = {{ 'true' if arg.get('is_running') else 'false' }};
 var collectionLoginBlockMessage = '현재 수집중입니다. 수집이 완료되면 로그인 해 주세요';
@@ -339,7 +368,8 @@ function readProfile(index) {
     keep_login: readToggleState($('#profile_keep_login_' + index)),
     nid_aut: String($('#profile_nid_aut_' + index).val() || '').trim(),
     nid_ses: String($('#profile_nid_ses_' + index).val() || '').trim(),
-    nid_jst: String($('#profile_nid_jst_' + index).val() || '').trim()
+    nid_jst: String($('#profile_nid_jst_' + index).val() || '').trim(),
+    profile_order: Number($('#profile_blocks .profile-block[data-profile-index="' + index + '"]').attr('data-profile-order') || 0)
   };
 }
 
@@ -474,26 +504,62 @@ function setFieldValue(id, value) {
 
 function refreshProfileTitles() {
   $('#profile_blocks .profile-block').each(function(idx) {
-    $(this).find('.np-profile-title').first().text('프로필 ' + (idx + 1));
+    var index = $(this).attr('data-profile-index');
+    var fallback = '프로필 ' + (idx + 1);
+    $(this).find('.np-profile-title').first().text(fallback);
+    $('#profile_tab_' + index).text(fallback).attr('href', '#profile_pane_' + index);
   });
 }
 
-function addProfileBlock($after) {
+function refreshNextProfileOrder() {
+  var maxOrder = 0;
+  $('#profile_blocks .profile-block').each(function() {
+    maxOrder = Math.max(maxOrder, Number($(this).attr('data-profile-order') || 0));
+  });
+  nextProfileOrder = Math.max(nextProfileOrder, maxOrder + 1);
+}
+
+function activateProfileTab(index) {
+  var $tab = $('#profile_tab_' + index);
+  if ($tab.length && $tab.tab) {
+    $tab.tab('show');
+  } else {
+    $('#profile_tab_heads .nav-link').removeClass('active');
+    $('#profile_blocks .profile-block').removeClass('show active');
+    $tab.addClass('active');
+    $('#profile_pane_' + index).addClass('show active');
+  }
+}
+
+function addProfileTab(index) {
+  var label = '프로필 ' + ($('#profile_blocks .profile-block').length);
+  var html = '<a class="nav-item nav-link" id="profile_tab_' + index + '" data-toggle="tab" href="#profile_pane_' + index + '" role="tab" data-profile-index="' + index + '">' + label + '</a>';
+  $('#profile_tab_heads').append(html);
+}
+
+function removeProfileTab(index) {
+  $('#profile_tab_' + index).remove();
+}
+
+function addProfileBlock() {
   var index = nextProfileIndex++;
+  var order = nextProfileOrder++;
   var html = $('#profile_prototype').html()
     .replace(/__INDEX__/g, String(index))
     .replace(/__PROFILE_NO__/g, String($('#profile_blocks .profile-block').length + 1));
-  if ($after && $after.length) {
-    $after.after(html);
-  } else {
-    $('#profile_blocks').append(html);
-  }
+  $('#profile_blocks').append(html);
+  $('#profile_pane_' + index).attr('data-profile-order', String(order));
+  addProfileTab(index);
   refreshProfileTitles();
   renderCookieStatuses();
+  activateProfileTab(index);
 }
 
 function removeProfileBlock($block) {
   var originalId = String($block.attr('data-original-id') || '').trim();
+  var removedIndex = $block.attr('data-profile-index');
+  var $nextBlock = $block.next('.profile-block');
+  var $prevBlock = $block.prev('.profile-block');
   if (originalId) deletedProfileIds.push(originalId);
   if ($('#profile_blocks .profile-block').length <= 1) {
     var index = $block.attr('data-profile-index');
@@ -508,6 +574,9 @@ function removeProfileBlock($block) {
     $block.attr('data-original-id', '');
   } else {
     $block.remove();
+    removeProfileTab(removedIndex);
+    var activateIndex = ($nextBlock.length ? $nextBlock : $prevBlock).attr('data-profile-index');
+    if (activateIndex !== undefined) activateProfileTab(activateIndex);
   }
   refreshProfileTitles();
   renderCookieStatuses();
@@ -579,9 +648,9 @@ document.addEventListener('click', function(e) {
   saveProfiles();
 }, true);
 
-$("body").on('click', '[id^="profile_add_"]', function(e) {
+$("#profile_add_btn").on('click', function(e) {
   e.preventDefault();
-  addProfileBlock($(this).closest('.profile-block'));
+  addProfileBlock();
 });
 
 $("body").on('click', '[id^="profile_delete_"]', function(e) {
@@ -648,6 +717,7 @@ $(document).on("keydown", function(e) {
 });
 
 $(document).ready(function() {
+  refreshNextProfileOrder();
   refreshProfileTitles();
   renderCookieStatuses();
 });

@@ -41,6 +41,7 @@ REWARD_KIND_EXCLUDED = "excluded"
 REWARD_KIND_OTHER = "other"
 NAVERPAY_MAIN_URL = "https://point.pay.naver.com/pc/main"
 NAVERPAY_MISSION_DETAIL_URL = "https://point.pay.naver.com/pc/mission-detail?dataType=category&rank=20&pageKey=all"
+PINCRUX_SOURCE_URL_PREFIX = "https://external-token.pay.naver.com"
 
 LOGIN_SESSION_TTL = 300
 _login_sessions = {}
@@ -1271,6 +1272,10 @@ async def wait_for_dwell_ready(page) -> float:
     except Exception:
         pass
     try:
+        await wait_for_pincrux_live_view_ready(page, timeout_ms=12000)
+    except Exception:
+        pass
+    try:
         await page.evaluate(
             """() => new Promise(resolve => {
                 requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -1352,9 +1357,13 @@ async def process_live_view_link(page, link: str, user_id: str, emit: Callable[[
     ready_wait = await wait_for_dwell_ready(page)
     dwell_started_at = time.monotonic()
     await asyncio.sleep(dwell_seconds)
+    reward_completed = await wait_for_pincrux_reward_completion(page, timeout_ms=5000)
     actual_dwell = time.monotonic() - dwell_started_at
     emit_visited(user_id, page.url, emit, dwell_seconds=dwell_seconds, actual_dwell=actual_dwell, ready_wait=ready_wait)
-    return DetailResult(user_id=user_id, url=link, status="visited", message=f"live-view watched: {dwell_seconds}s")
+    message = f"live-view watched: {dwell_seconds}s"
+    if reward_completed:
+        message += "; reward completed"
+    return DetailResult(user_id=user_id, url=link, status="visited", message=message)
 
 
 async def wait_for_campaign2_popup(page, timeout_ms: int = 12000):
@@ -1406,6 +1415,18 @@ async def click_campaign2_point_button_and_dwell(page, dwell_seconds: float, use
     if is_excluded_reward_url(active_page.url):
         emit(f"{user_id}: excluded reward URL - {active_page.url}")
         raise ExcludedRewardUrl("excluded reward URL")
+    if not is_reward_url(active_page.url):
+        emit(f"{user_id}: ignored unsupported reward landing - {active_page.url}")
+        if active_page is not page:
+            try:
+                await active_page.close()
+            except Exception:
+                pass
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
+        return active_page
     ready_wait = await wait_for_dwell_ready(active_page)
     dwell_started_at = time.monotonic()
     await asyncio.sleep(dwell_seconds)
@@ -1417,6 +1438,9 @@ async def click_campaign2_point_button_and_dwell(page, dwell_seconds: float, use
 async def handle_pincrux_shopping_live(page, link: str, user_id: str, emit: Callable[[str], None]):
     await campaign_page_diagnostic(page, user_id, "pincrux shopping live loaded", emit)
     short_reward_count = await handle_pincrux_short_live_cards(page, user_id, emit)
+    if short_reward_count > 0:
+        return DetailResult(user_id=user_id, url=link, status="visited", message=f"pincrux live cards visited: {short_reward_count}")
+
     clicked = False
     watched_page = page
     live_watch_seconds = await extract_pincrux_watch_seconds(page, default_seconds=5)
@@ -1527,8 +1551,11 @@ async def handle_pincrux_short_live_cards(page, user_id: str, emit: Callable[[st
             ready_wait = await wait_for_dwell_ready(active_page)
             dwell_started_at = time.monotonic()
             await asyncio.sleep(dwell_seconds)
+            reward_completed = await wait_for_pincrux_reward_completion(active_page, timeout_ms=5000)
             actual_dwell = time.monotonic() - dwell_started_at
             emit_visited(user_id, active_page.url, emit, dwell_seconds=dwell_seconds, actual_dwell=actual_dwell, ready_wait=ready_wait)
+            if reward_completed:
+                emit(f"{user_id}: pincrux reward completed - {active_page.url}")
             visited += 1
             if work_page is None and active_page is not page:
                 try:
@@ -1667,6 +1694,159 @@ async def follow_pincrux_note_reward_button(page, seconds: int):
     return active_page
 
 
+async def expand_pincrux_live_more(page, max_clicks: int = 5):
+    for _ in range(max_clicks):
+        try:
+            button = page.locator("button, a, [role='button']").filter(has_text=re.compile(r"\ub77c\uc774\ube0c\s*\ub354\s*\ubcf4\uae30")).first
+            if await button.count() == 0:
+                break
+            await button.scroll_into_view_if_needed(timeout=2000)
+            await button.click(timeout=3000, force=True)
+            await asyncio.sleep(0.7)
+        except Exception:
+            break
+
+
+async def collect_pincrux_short_live_rows(page):
+    return await page.evaluate(
+        """() => {
+            const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+            const toHref = el => {
+                const href = el.href || '';
+                if (href) return href;
+                const onclick = el.getAttribute('onclick') || '';
+                const match = onclick.match(/Go\\(['"]([^'"]+)['"]/);
+                if (!match) return '';
+                try {
+                    return new URL(match[1].replace(/&amp;/g, '&'), location.href).href;
+                } catch (e) {
+                    return match[1].replace(/&amp;/g, '&');
+                }
+            };
+            const candidates = [];
+            const seen = new Set();
+            const roots = Array.from(document.querySelectorAll('a[href], button, [role="button"], [onclick], .comming-list-item'));
+            for (const el of roots) {
+                const text = norm(el.innerText || el.textContent);
+                const onclick = el.getAttribute('onclick') || '';
+                const href = toHref(el);
+                const secondsMatch = text.match(/(\\d+)\\s*\\uCD08\\s*\\uBCF4\\uBA74/);
+                const pointMatch = text.match(/(\\d+)\\s*\\uC6D0/);
+                const isShortLive =
+                    secondsMatch ||
+                    ((href.includes('note.html') || onclick.includes('note.html')) && pointMatch) ||
+                    ((href.includes('live-view.html') || onclick.includes('live-view.html')) && pointMatch);
+                if (!isShortLive || /\\uC801\\uB9BD\\s*\\uC644\\uB8CC|\\uC801\\uB9BD\\uC644\\uB8CC/.test(text)) continue;
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden') continue;
+                if (!el.dataset.naverpaperShortLiveId) {
+                    el.dataset.naverpaperShortLiveId = String(candidates.length + 1);
+                }
+                let seconds = secondsMatch ? Number(secondsMatch[1] || 1) : 1;
+                if (!secondsMatch && (href.includes('live-view.html') || onclick.includes('live-view.html'))) {
+                    seconds = 5;
+                }
+                const key = href || el.dataset.naverpaperShortLiveId || text;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                candidates.push({
+                    id: el.dataset.naverpaperShortLiveId,
+                    href,
+                    text,
+                    seconds,
+                    point: pointMatch ? Number(pointMatch[1] || 0) : 0
+                });
+            }
+            return candidates;
+        }"""
+    )
+
+
+async def follow_pincrux_note_reward_button(page, seconds: int):
+    clicked = await page.evaluate(
+        """(seconds) => {
+            const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+            const rewardText = new RegExp('\\\\d+\\\\s*\\uCD08\\\\s*\\uBCF4\\uACE0\\\\s*\\\\d+\\\\s*\\uC6D0\\\\s*\\uC801\\uB9BD');
+            const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], [onclick], .cta-btn'));
+            for (const el of candidates) {
+                const text = norm(el.innerText || el.textContent);
+                const onclick = el.getAttribute('onclick') || '';
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden') continue;
+                const ctaLike = onclick.includes('showLive') || (el.className || '').includes('cta-btn');
+                if (!ctaLike && !rewardText.test(text)) continue;
+                el.click();
+                return {text, onclick, tag: el.tagName};
+            }
+            return null;
+        }""",
+        seconds,
+    )
+    if not clicked:
+        return page
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        if "live-view.html" in str(page.url or ""):
+            break
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=1000)
+        except Exception:
+            pass
+        await asyncio.sleep(0.3)
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=5000)
+    except Exception:
+        pass
+    return page
+
+
+async def wait_for_pincrux_live_view_ready(page, timeout_ms: int = 12000) -> bool:
+    if "live-view.html" not in str(page.url or ""):
+        return False
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            if await page.locator("iframe").count() > 0:
+                for frame in page.frames:
+                    if "view.shoppinglive.naver.com" not in str(frame.url or ""):
+                        continue
+                    try:
+                        await frame.wait_for_load_state("domcontentloaded", timeout=1000)
+                    except Exception:
+                        pass
+                    try:
+                        video_count = await frame.locator("video").count()
+                    except Exception:
+                        video_count = 0
+                    if video_count > 0:
+                        return True
+                    try:
+                        body_text = await frame.locator("body").inner_text(timeout=1000)
+                    except Exception:
+                        body_text = ""
+                    if body_text.strip():
+                        return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.4)
+    return False
+
+
+async def wait_for_pincrux_reward_completion(page, timeout_ms: int = 5000) -> bool:
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        try:
+            body_text = await page.locator("body").inner_text(timeout=1000)
+        except Exception:
+            body_text = ""
+        if "\uc801\ub9bd \uc644\ub8cc" in body_text or "\uc801\ub9bd\uc644\ub8cc" in body_text:
+            return True
+        await asyncio.sleep(0.4)
+    return False
+
+
 def ppomppu_target_url(link: str) -> str:
     try:
         target = (parse_qs(urlparse(link).query).get("target") or [""])[0]
@@ -1692,6 +1872,8 @@ async def visit_campaign_url(page, link: str, session_db, user_id: str, emit: Ca
 
     try:
         await page.goto(link, wait_until="domcontentloaded", timeout=20000)
+        if is_pincrux_source_url(link):
+            await wait_for_pincrux_source_redirect(page)
     except Exception:
         await campaign_page_diagnostic(page, user_id, "generic campaign goto timeout/error", emit)
         raise
@@ -1708,6 +1890,12 @@ async def visit_campaign_url(page, link: str, session_db, user_id: str, emit: Ca
         return await process_campaign2_link(page, page.url, session_db, user_id, emit)
     if page.url.startswith("https://nsl.pincrux.com/live-view.html"):
         return await process_live_view_link(page, page.url, user_id, emit)
+    if "nsl.pincrux.com/note.html" in page.url or "nsl.pincrux.com/note.html" in link:
+        seconds = await extract_pincrux_watch_seconds(page, default_seconds=1)
+        active_page = await follow_pincrux_note_reward_button(page, seconds)
+        if active_page.url.startswith("https://nsl.pincrux.com/live-view.html"):
+            return await process_live_view_link(active_page, active_page.url, user_id, emit, seconds)
+        return DetailResult(user_id=user_id, url=link, status="skipped", message=f"pincrux note reward button not available: {active_page.url}")
     if "point.pay.naver.com/mission-detail" in page.url or "point.pay.naver.com/pc/mission-detail" in page.url:
         return await handle_naverpay_mission_detail(page, link, session_db, user_id, emit, excluded_reward_sources)
     if "nsl.pincrux.com/shopping-live" in page.url or "nsl.pincrux.com/shopping-live" in link:
@@ -1831,6 +2019,27 @@ async def wait_for_bridge_redirect(page, timeout_ms: int = 8000):
         pass
 
 
+async def wait_for_pincrux_source_redirect(page, timeout_ms: int = 12000):
+    deadline = time.time() + (timeout_ms / 1000)
+    while time.time() < deadline:
+        current_url = str(page.url or "")
+        if (
+            current_url.startswith("https://nsl.pincrux.com/live-view.html")
+            or "nsl.pincrux.com/shopping-live" in current_url
+            or is_excluded_reward_url(current_url)
+        ):
+            break
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=1000)
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=2000)
+    except Exception:
+        pass
+
+
 async def collect_lazy_page_content(page):
     try:
         last_height = 0
@@ -1894,6 +2103,9 @@ async def process_campaign_links(page, campaign_links, session_db, user_id: str,
                 emit(f"{user_id}: skipped known excluded reward source - {link}")
                 details.append(DetailResult(user_id=user_id, url=link, status="skipped", message="known excluded reward source"))
                 continue
+            if not is_reward_url(link) and not is_pincrux_reward_candidate(link):
+                details.append(DetailResult(user_id=user_id, url=link, status="skipped", message="unsupported reward URL"))
+                continue
             if is_excluded_reward_url(link):
                 emit(f"{user_id}: excluded reward URL - {link}")
                 record_excluded_reward_source(session_db, excluded_reward_sources, link, link)
@@ -1935,9 +2147,10 @@ async def process_campaign_links(page, campaign_links, session_db, user_id: str,
                 detail.url = link
             else:
                 detail = await visit_campaign_url(page, link, session_db, user_id, emit, excluded_reward_sources)
-            existing_visit = session_db.query(UrlVisit).filter_by(url=link, user_id=user_id).first()
-            if not existing_visit:
-                session_db.add(UrlVisit(url=link, user_id=user_id, visited_at=datetime.now()))
+            if is_reward_url(link) and not should_revisit_url(link):
+                existing_visit = session_db.query(UrlVisit).filter_by(url=link, user_id=user_id).first()
+                if not existing_visit:
+                    session_db.add(UrlVisit(url=link, user_id=user_id, visited_at=datetime.now()))
             details.append(detail)
         except Exception as e:
             details.append(DetailResult(user_id=user_id, url=link, status="error", message=str(e)))
@@ -2250,7 +2463,20 @@ def is_excluded_reward_url(href: str) -> bool:
 
 def is_account_scoped_reward_url(href: str) -> bool:
     href = str(href or "").strip()
-    return href.startswith("https://nsl.pincrux.com/live-view.html")
+    return is_pincrux_reward_candidate(href)
+
+
+def is_pincrux_source_url(href: str) -> bool:
+    return str(href or "").strip().startswith(PINCRUX_SOURCE_URL_PREFIX)
+
+
+def is_pincrux_page_url(href: str) -> bool:
+    return str(href or "").strip().startswith("https://nsl.pincrux.com")
+
+
+def is_pincrux_reward_candidate(href: str) -> bool:
+    href = str(href or "").strip()
+    return is_pincrux_source_url(href) or is_pincrux_page_url(href)
 
 
 def reward_source_key(source_url: str) -> str:
@@ -2505,9 +2731,16 @@ async def process_naverpay_point_main(
             point_rows = await _naverpay_text_hrefs(page, "클릭하고")
             live_rows = await _naverpay_text_hrefs(page, "쇼핑라이브 보고")
 
+            point_rows.extend(await _naverpay_text_hrefs(page, "\ud074\ub9ad\ud558\uace0"))
+            live_rows.extend(await _naverpay_text_hrefs(page, "\uc1fc\ud551\ub77c\uc774\ube0c \ubcf4\uace0"))
+
             for href, text in live_rows:
                 if is_reward_url(href):
                     add_reward_url(collected_urls, href)
+                elif is_pincrux_page_url(href):
+                    collected_urls.add(canonical_reward_url(href))
+                elif is_pincrux_source_url(href):
+                    collected_urls.add(canonical_reward_url(href))
 
             for href, text in point_rows:
                 if is_reward_url(href):
@@ -2576,14 +2809,22 @@ async def process_naverpay_mission_detail_source(
                         add_reward_url(collected_urls, final_url)
                         campaign_count += 1
                     elif final_kind == REWARD_KIND_LIVE_VIEW:
-                        final_kind, final_url, live_urls = await resolve_naverpay_bridge_url_for_collection(page, bridge_url)
-                        for live_url in live_urls:
-                            add_reward_url(collected_urls, live_url)
+                        final_kind, final_url, live_urls, pincrux_source_url = await resolve_naverpay_bridge_url_for_collection(page, bridge_url)
+                        if pincrux_source_url:
+                            collected_urls.add(pincrux_source_url)
                             live_count += 1
+                        else:
+                            for live_url in live_urls:
+                                if is_reward_url(live_url):
+                                    add_reward_url(collected_urls, live_url)
+                                    live_count += 1
+                                elif is_pincrux_page_url(live_url):
+                                    collected_urls.add(canonical_reward_url(live_url))
+                                    live_count += 1
                     continue
                 if emit and (idx == 1 or idx == total or idx % 5 == 0):
                     emit(f"naverpay mission detail resolving bridge urls for {account.user_id}: {idx}/{total}")
-                final_kind, final_url, live_urls = await resolve_naverpay_bridge_url_for_collection(page, bridge_url)
+                final_kind, final_url, live_urls, pincrux_source_url = await resolve_naverpay_bridge_url_for_collection(page, bridge_url)
                 record_reward_source_resolution(session_db, source_resolutions, source_key, final_kind, final_url)
                 resolved_count += 1
                 if final_kind == REWARD_KIND_EXCLUDED:
@@ -2593,9 +2834,17 @@ async def process_naverpay_mission_detail_source(
                     add_reward_url(collected_urls, final_url)
                     campaign_count += 1
                 elif final_kind == REWARD_KIND_LIVE_VIEW:
-                    for live_url in live_urls:
-                        add_reward_url(collected_urls, live_url)
+                    if pincrux_source_url:
+                        collected_urls.add(pincrux_source_url)
                         live_count += 1
+                    else:
+                        for live_url in live_urls:
+                            if is_reward_url(live_url):
+                                add_reward_url(collected_urls, live_url)
+                                live_count += 1
+                            elif is_pincrux_page_url(live_url):
+                                collected_urls.add(canonical_reward_url(live_url))
+                                live_count += 1
             emit(
                 f"naverpay mission detail reward urls for {account.user_id}: "
                 f"campaign2={campaign_count} live-view={live_count} newly-resolved={resolved_count}"
@@ -2662,13 +2911,13 @@ async def collect_pincrux_live_view_urls(page) -> list[str]:
     urls = []
     seen = set()
 
-    def add(url: str):
+    def add(url: str, allow_pincrux_page: bool = False):
         url = canonical_reward_url(str(url or "").strip())
-        if is_reward_url(url) and url not in seen:
+        if (is_reward_url(url) or (allow_pincrux_page and is_pincrux_page_url(url))) and url not in seen:
             seen.add(url)
             urls.append(url)
 
-    add(page.url)
+    add(page.url, allow_pincrux_page=True)
     if "nsl.pincrux.com/shopping-live" not in str(page.url or ""):
         return urls
 
@@ -2679,7 +2928,7 @@ async def collect_pincrux_live_view_urls(page) -> list[str]:
     try:
         rows = await collect_pincrux_short_live_rows(page)
         for row in rows:
-            add(str(row.get("href") or ""))
+            add(str(row.get("href") or ""), allow_pincrux_page=True)
     except Exception:
         pass
 
@@ -2724,20 +2973,25 @@ async def collect_pincrux_live_view_urls(page) -> list[str]:
     return urls
 
 
-async def resolve_naverpay_bridge_url_for_collection(page, bridge_url: str) -> tuple[str, str, list[str]]:
+async def resolve_naverpay_bridge_url_for_collection(page, bridge_url: str) -> tuple[str, str, list[str], str]:
     try:
         await page.goto(bridge_url, wait_until="domcontentloaded", timeout=30000)
     except Exception:
-        return REWARD_KIND_OTHER, "", []
+        return REWARD_KIND_OTHER, "", [], ""
     await wait_for_bridge_redirect(page, timeout_ms=10000)
+    pincrux_source_url = canonical_reward_url(page.url) if is_pincrux_source_url(page.url) else ""
+    if pincrux_source_url:
+        await wait_for_pincrux_source_redirect(page, timeout_ms=12000)
     current_url = canonical_reward_url(page.url)
     final_kind = classify_reward_final_url(current_url)
     if final_kind == REWARD_KIND_CAMPAIGN2:
-        return final_kind, current_url, [current_url] if is_reward_url(current_url) else []
+        return final_kind, current_url, [current_url] if is_reward_url(current_url) else [], ""
     if final_kind == REWARD_KIND_LIVE_VIEW:
         live_urls = await collect_pincrux_live_view_urls(page)
-        return final_kind, live_urls[0] if live_urls else current_url, live_urls
-    return final_kind, current_url, []
+        if not live_urls and is_pincrux_page_url(current_url):
+            live_urls = [current_url]
+        return final_kind, live_urls[0] if live_urls else current_url, live_urls, pincrux_source_url
+    return final_kind, current_url, [], pincrux_source_url
 
 
 async def resolve_naverpay_bridge_url_to_campaign2(page, bridge_url: str) -> str:
@@ -2818,12 +3072,13 @@ async def save_naver_campaign_urls(
         ("https://m.ppomppu.co.kr/new/bbs_list.php?id=coupon&extref=1", process_ppomppu_url),
         ("https://damoang.net/economy", process_damoang_url),
     ]
-    for account in accounts or []:
+    collector_account = (accounts or [None])[0]
+    if collector_account:
         try:
             account_urls = set()
-            emit(f"collection source {NAVERPAY_MISSION_DETAIL_URL} ({account.user_id}) started")
+            emit(f"collection source {NAVERPAY_MISSION_DETAIL_URL} ({collector_account.user_id}) started")
             await process_naverpay_mission_detail_source(
-                account,
+                collector_account,
                 session_db,
                 cookie_dir,
                 account_urls,
@@ -2832,10 +3087,10 @@ async def save_naver_campaign_urls(
                 login_proxy_url,
                 source_resolutions,
             )
-            add_collected_for_account(account.user_id, account_urls)
-            emit(f"collection source {NAVERPAY_MISSION_DETAIL_URL} ({account.user_id}): +{len(account_urls)}")
+            add_collected_for_account(collector_account.user_id, account_urls)
+            emit(f"collection source {NAVERPAY_MISSION_DETAIL_URL} ({collector_account.user_id}): +{len(account_urls)}")
         except Exception as e:
-            emit(f"{NAVERPAY_MISSION_DETAIL_URL}: collection error for {account.user_id} - {e}")
+            emit(f"{NAVERPAY_MISSION_DETAIL_URL}: collection error for {collector_account.user_id} - {e}")
 
     timeout = ClientTimeout(total=30, connect=10, sock_connect=10, sock_read=20)
     async with ClientSession(timeout=timeout) as session:
@@ -2851,12 +3106,12 @@ async def save_naver_campaign_urls(
             except Exception as e:
                 emit(f"{url}: collection error - {e}")
 
-    for account in accounts or []:
+    if collector_account:
         try:
             account_urls = set()
-            emit(f"collection source {NAVERPAY_MAIN_URL} ({account.user_id}) started")
+            emit(f"collection source {NAVERPAY_MAIN_URL} ({collector_account.user_id}) started")
             await process_naverpay_point_main(
-                account,
+                collector_account,
                 session_db,
                 cookie_dir,
                 account_urls,
@@ -2864,14 +3119,24 @@ async def save_naver_campaign_urls(
                 reward_proxy_url,
                 login_proxy_url,
             )
-            add_collected_for_account(account.user_id, account_urls)
-            emit(f"collection source {NAVERPAY_MAIN_URL} ({account.user_id}): +{len(account_urls)}")
+            add_collected_for_account(collector_account.user_id, account_urls)
+            emit(f"collection source {NAVERPAY_MAIN_URL} ({collector_account.user_id}): +{len(account_urls)}")
         except Exception as e:
-            emit(f"{NAVERPAY_MAIN_URL}: collection error for {account.user_id} - {e}")
+            emit(f"{NAVERPAY_MAIN_URL}: collection error for {collector_account.user_id} - {e}")
+
+    account_scoped_urls = set()
+    for urls_for_account in account_collected_urls.values():
+        account_scoped_urls.update(urls_for_account)
+    if account_scoped_urls:
+        for account in accounts or []:
+            account_collected_urls.setdefault(account.user_id, set()).update(account_scoped_urls)
 
     existing_collected_urls = set()
+    for stale_url in session_db.query(CampaignUrl).all():
+        if not is_reward_url(stale_url.url):
+            stale_url.is_available = False
     for link in collected_urls:
-        if is_excluded_reward_url(link):
+        if not is_reward_url(link):
             continue
         existing_url = session_db.query(CampaignUrl).filter_by(url=link).first()
         if existing_url:
@@ -2889,7 +3154,10 @@ async def fetch_naver_campaign_urls(session_db, nid: str, candidate_urls: Option
             return campaign_links, already_visited_count
         for link in candidate_urls:
             link = str(link or "").strip()
-            if not link or is_excluded_reward_url(link):
+            if not link or (not is_reward_url(link) and not is_pincrux_reward_candidate(link)):
+                continue
+            if should_revisit_url(link):
+                campaign_links.add(link)
                 continue
             url_obj = session_db.query(CampaignUrl).filter_by(url=link).first()
             if url_obj and not url_obj.is_available:
@@ -2904,13 +3172,14 @@ async def fetch_naver_campaign_urls(session_db, nid: str, candidate_urls: Option
                 already_visited_count += 1
         return campaign_links, already_visited_count
 
-    query = session_db.query(CampaignUrl).filter_by(is_available=True)
-    available_urls = query.all()
+    available_urls = session_db.query(CampaignUrl).all()
     for url_obj in available_urls:
-        if is_excluded_reward_url(url_obj.url):
+        if not is_reward_url(url_obj.url) and not is_pincrux_reward_candidate(url_obj.url):
             continue
         if should_revisit_url(url_obj.url):
             campaign_links.add(url_obj.url)
+            continue
+        if not url_obj.is_available:
             continue
         existing_visit = session_db.query(UrlVisit).filter_by(url=url_obj.url, user_id=nid).first()
         if not existing_visit:
@@ -2921,7 +3190,8 @@ async def fetch_naver_campaign_urls(session_db, nid: str, candidate_urls: Option
 
 
 def should_revisit_url(url: str) -> bool:
-    return str(url or "").startswith("https://nsl.pincrux.com/live-view.html")
+    url = str(url or "")
+    return is_pincrux_reward_candidate(url)
 
 
 def delete_old_stuff(session_db, keep_campaign_days: int, keep_user_days: int, emit: Callable[[str], None]):
@@ -2946,7 +3216,7 @@ def recent_runs(db_path: str, limit: int = 30):
         return [_history_to_dict(row) for row in rows]
 
 
-def recent_run_account_tabs(db_path: str, limit: int = 30):
+def recent_run_account_tabs(db_path: str, limit: int = 30, profile_order: Optional[list[str]] = None):
     db = Database(db_path)
     db.create_all()
     with db.get_session() as session:
@@ -3023,6 +3293,12 @@ def recent_run_account_tabs(db_path: str, limit: int = 30):
                     }
                 )
                 tabs[user_id]["runs"].append(base)
+
+        profile_order = [str(user_id or "").strip() for user_id in (profile_order or []) if str(user_id or "").strip()]
+        if profile_order:
+            known = [user_id for user_id in profile_order if user_id in tabs]
+            unknown = [user_id for user_id in order if user_id not in set(known)]
+            order = known + unknown
 
         return [tabs[user_id] for user_id in order]
 

@@ -132,7 +132,8 @@ class ModuleMain(PluginModuleBase):
         arg["cookie_statuses"] = np_module.cookie_statuses(self._db_path(), self._cookie_dir(), accounts) if np_module else []
         if sub == "result":
             arg["runs"] = np_module.recent_runs(self._db_path(), 50) if np_module else []
-            arg["run_account_tabs"] = np_module.recent_run_account_tabs(self._db_path(), 50) if np_module else []
+            profile_order = [item.get("user_id") for item in arg["profiles"] if item.get("user_id")]
+            arg["run_account_tabs"] = np_module.recent_run_account_tabs(self._db_path(), 50, profile_order) if np_module else []
         return render_template(f"{P.package_name}_{self.name}_{sub}.html", arg=arg)
 
     def process_command(self, command, arg1, arg2, arg3, req):
@@ -362,7 +363,15 @@ class ModuleMain(PluginModuleBase):
         try:
             data = json.loads(raw)
             if isinstance(data, list):
-                return [self._normalize_profile(item) for item in data if self._normalize_profile(item).get("user_id")]
+                profiles = []
+                for idx, item in enumerate(data):
+                    profile = self._normalize_profile(item)
+                    if not profile.get("user_id"):
+                        continue
+                    if not profile.get("profile_order"):
+                        profile["profile_order"] = idx + 1
+                    profiles.append(profile)
+                return sorted(profiles, key=lambda item: item.get("profile_order") or 0)
         except Exception:
             pass
         legacy = []
@@ -383,6 +392,10 @@ class ModuleMain(PluginModuleBase):
 
     def _normalize_profile(self, item):
         item = item if isinstance(item, dict) else {}
+        try:
+            profile_order = int(item.get("profile_order") or item.get("order") or 0)
+        except Exception:
+            profile_order = 0
         return {
             "user_id": str(item.get("user_id") or "").strip(),
             "password": str(item.get("password") or "").strip(),
@@ -390,6 +403,7 @@ class ModuleMain(PluginModuleBase):
             "nid_aut": str(item.get("nid_aut") or "").strip(),
             "nid_ses": str(item.get("nid_ses") or "").strip(),
             "nid_jst": str(item.get("nid_jst") or "").strip(),
+            "profile_order": profile_order,
         }
 
     def _profile_rows(self):
@@ -407,8 +421,9 @@ class ModuleMain(PluginModuleBase):
         if not profile.get("user_id"):
             return {"ret": "warning", "msg": "account id is required"}
         profiles = [item for item in self._profiles() if item.get("user_id") != profile["user_id"]]
+        if not profile.get("profile_order"):
+            profile["profile_order"] = self._next_profile_order(profiles)
         profiles.append(profile)
-        profiles.sort(key=lambda x: x.get("user_id", ""))
         P.ModelSetting.set("naver_profiles", json.dumps(profiles, ensure_ascii=False))
         self._write_profile_cookie(profile)
         return {"ret": "success", "msg": "profile saved", "data": self._profile_rows()}
@@ -423,24 +438,32 @@ class ModuleMain(PluginModuleBase):
         if not isinstance(rows, list):
             return {"ret": "warning", "msg": "invalid profile list"}
 
+        previous_profiles = self._profiles()
+        previous_order = {item.get("user_id"): item.get("profile_order") or idx + 1 for idx, item in enumerate(previous_profiles) if item.get("user_id")}
+        next_order = self._next_profile_order(previous_profiles)
         normalized = []
         seen = set()
-        for item in rows:
+        for idx, item in enumerate(rows):
             profile = self._normalize_profile(item)
             user_id = profile.get("user_id")
             if not user_id:
                 continue
+            if user_id in previous_order:
+                profile["profile_order"] = previous_order[user_id]
+            else:
+                profile["profile_order"] = next_order
+                next_order += 1
             if user_id in seen:
                 return {"ret": "warning", "msg": f"duplicated account id: {user_id}"}
             seen.add(user_id)
             normalized.append(profile)
 
-        previous_ids = {item.get("user_id") for item in self._profiles() if item.get("user_id")}
+        previous_ids = {item.get("user_id") for item in previous_profiles if item.get("user_id")}
         current_ids = {item.get("user_id") for item in normalized if item.get("user_id")}
         remove_ids = set(str(x or "").strip() for x in deleted_ids if str(x or "").strip())
         remove_ids.update(previous_ids - current_ids)
 
-        normalized.sort(key=lambda x: x.get("user_id", ""))
+        normalized = sorted(normalized, key=lambda item: item.get("profile_order") or 0)
         P.ModelSetting.set("naver_profiles", json.dumps(normalized, ensure_ascii=False))
         for profile in normalized:
             self._write_profile_cookie(profile)
@@ -484,9 +507,7 @@ class ModuleMain(PluginModuleBase):
         profile["nid_aut"] = cookies.get("NID_AUT", profile.get("nid_aut", ""))
         profile["nid_ses"] = cookies.get("NID_SES", profile.get("nid_ses", ""))
         profile["nid_jst"] = cookies.get("NID_JST", profile.get("nid_jst", ""))
-        profiles = [item for item in self._profiles() if item.get("user_id") != profile["user_id"]]
-        profiles.append(profile)
-        profiles.sort(key=lambda x: x.get("user_id", ""))
+        profiles = self._replace_profile_preserving_order(profile)
         P.ModelSetting.set("naver_profiles", json.dumps(profiles, ensure_ascii=False))
         return {"ret": "success", "msg": "cookie refreshed", "data": self._profile_rows()}
 
@@ -571,10 +592,28 @@ class ModuleMain(PluginModuleBase):
         profile["nid_aut"] = cookies.get("NID_AUT", profile.get("nid_aut", ""))
         profile["nid_ses"] = cookies.get("NID_SES", profile.get("nid_ses", ""))
         profile["nid_jst"] = cookies.get("NID_JST", profile.get("nid_jst", ""))
-        profiles = [item for item in self._profiles() if item.get("user_id") != profile["user_id"]]
-        profiles.append(profile)
-        profiles.sort(key=lambda x: x.get("user_id", ""))
+        profiles = self._replace_profile_preserving_order(profile)
         P.ModelSetting.set("naver_profiles", json.dumps(profiles, ensure_ascii=False))
+
+    def _replace_profile_preserving_order(self, profile):
+        profiles = self._profiles()
+        replaced = False
+        for idx, item in enumerate(profiles):
+            if item.get("user_id") == profile.get("user_id"):
+                if not profile.get("profile_order"):
+                    profile["profile_order"] = item.get("profile_order") or idx + 1
+                profiles[idx] = profile
+                replaced = True
+                break
+        if not replaced:
+            if not profile.get("profile_order"):
+                profile["profile_order"] = self._next_profile_order(profiles)
+            profiles.append(profile)
+        return profiles
+
+    def _next_profile_order(self, profiles):
+        orders = [int(item.get("profile_order") or 0) for item in profiles or []]
+        return (max(orders) if orders else 0) + 1
 
     def _close_profile_login_session(self, user_id, np_module=None):
         try:
