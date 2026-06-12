@@ -3767,10 +3767,25 @@ async def write_naver_cafe_post(
         if not menuid:
             return False, f"'{board_name}' menu ID를 찾지 못했습니다", await _happybean_screenshot(page, user_id, "cafe")
 
-        write_url = f"https://cafe.naver.com/ArticleWrite.nhn?search.clubid={clubid}&search.menuid={menuid}"
+        # 글쓰기 URL: 신형/구형 모두 시도
+        cafe_name = str(cafe_url).rstrip("/").split("/")[-1]
+        write_urls = [
+            f"https://cafe.naver.com/ArticleWrite.nhn?search.clubid={clubid}&search.menuid={menuid}",
+            f"https://cafe.naver.com/ArticleWrite.nhn?clubid={clubid}&menuid={menuid}",
+            f"https://cafe.naver.com/{cafe_name}/articles/write?menuId={menuid}",
+        ]
         emit(f"{user_id}: [happybean] 카페 글쓰기 이동 (clubid={clubid} menuid={menuid})")
-        await page.goto(write_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(5000)
+        for wu in write_urls:
+            await page.goto(wu, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(3000)
+            try:
+                bt = await page.locator("body").inner_text(timeout=3000)
+            except Exception:
+                bt = ""
+            if "찾을 수 없" not in bt[:300] and "등록된 네이버 카페가 아닙니다" not in bt[:300]:
+                emit(f"{user_id}: [happybean] 글쓰기 URL 사용: {wu}")
+                break
+            emit(f"{user_id}: [happybean] URL 실패({wu}), 다음 시도")
 
         body_text = ""
         try:

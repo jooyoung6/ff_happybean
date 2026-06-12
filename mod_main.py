@@ -383,6 +383,8 @@ class ModuleMain(PluginModuleBase):
             raise ValueError("Naver account profile is empty")
         cafe_url_override = str(P.ModelSetting.get("happybean_cafe_url") or "").strip()
         if cafe_url_override:
+            if not cafe_url_override.startswith("http"):
+                cafe_url_override = "https://" + cafe_url_override
             np_module.HAPPYBEAN_CAFE_URL = cafe_url_override
         config = np_module.RunConfig(
             db_path=self._db_path(),
