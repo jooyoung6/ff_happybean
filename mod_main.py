@@ -199,6 +199,14 @@ class ModuleMain(PluginModuleBase):
                     return jsonify(warning)
                 run_id = int(str(arg1 or "0").strip() or "0")
                 return jsonify({"ret": "success", "data": self._np().happybean_run_details(self._db_path(), run_id)})
+            if command == "happybean_screenshot":
+                import base64, os as _os
+                ss_path = str(arg1 or "")
+                if not ss_path or not _os.path.isfile(ss_path):
+                    return jsonify({"ret": "error", "msg": "파일 없음"})
+                with open(ss_path, "rb") as f:
+                    data = base64.b64encode(f.read()).decode("utf-8")
+                return jsonify({"ret": "success", "data": data})
             return jsonify({"ret": "warning", "msg": f"unsupported command: {command}"})
         except Exception as e:
             P.logger.error(f"Exception:{str(e)}")

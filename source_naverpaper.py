@@ -169,6 +169,7 @@ class HappybeanDetail(Base):
     action = Column(String, default="")
     status = Column(String, default="")
     message = Column(Text, default="")
+    screenshot_path = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.now)
     run = relationship("HappybeanRun")
 
@@ -192,6 +193,9 @@ class Database:
             existing = {row[1] for row in conn.execute(text("PRAGMA table_info(run_account_summary)"))}
             if existing and "target_url_count" not in existing:
                 conn.execute(text("ALTER TABLE run_account_summary ADD COLUMN target_url_count INTEGER DEFAULT 0"))
+            existing = {row[1] for row in conn.execute(text("PRAGMA table_info(happybean_detail)"))}
+            if existing and "screenshot_path" not in existing:
+                conn.execute(text("ALTER TABLE happybean_detail ADD COLUMN screenshot_path TEXT DEFAULT ''"))
 
     @contextmanager
     def get_session(self):
@@ -255,6 +259,7 @@ class HappybeanDetailResult:
     action: str = ""
     status: str = ""
     message: str = ""
+    screenshot_path: str = ""
 
 
 @dataclass
@@ -3463,6 +3468,18 @@ def _fmt(value):
 
 # ===== HAPPYBEAN (해피빈 콩받기) =====
 
+async def _happybean_screenshot(page, user_id: str, action: str) -> str:
+    """현재 페이지 스크린샷을 /data/tmp/ 에 저장하고 경로 반환."""
+    try:
+        import time as _time
+        ss_dir = "/data/tmp"
+        os.makedirs(ss_dir, exist_ok=True)
+        ss_path = f"{ss_dir}/happybean_{action}_{user_id}_{int(_time.time())}.png"
+        await page.screenshot(path=ss_path, full_page=False)
+        return ss_path
+    except Exception:
+        return ""
+
 async def _happybean_fill_title(page, title: str, user_id: str, emit: Callable) -> bool:
     """게시물 제목 입력. True 반환 시 성공."""
     # 1. textarea (카페 현행 UI: textarea.textarea_input)
@@ -3676,8 +3693,8 @@ async def write_naver_cafe_post(
     content: str,
     user_id: str,
     emit: Callable,
-) -> tuple[bool, str]:
-    """네이버 카페 자유게시판에 글 작성. (성공여부, 메시지) 반환."""
+) -> tuple[bool, str, str]:
+    """네이버 카페 자유게시판에 글 작성. (성공여부, 메시지, 스크린샷경로) 반환."""
     try:
         emit(f"{user_id}: [happybean] 카페 접속 중")
         await page.goto(cafe_url, wait_until="domcontentloaded", timeout=30000)
@@ -3745,9 +3762,9 @@ async def write_naver_cafe_post(
                     pass
 
         if not clubid:
-            return False, "카페 club ID를 찾지 못했습니다"
+            return False, "카페 club ID를 찾지 못했습니다", await _happybean_screenshot(page, user_id, "cafe")
         if not menuid:
-            return False, f"'{board_name}' menu ID를 찾지 못했습니다"
+            return False, f"'{board_name}' menu ID를 찾지 못했습니다", await _happybean_screenshot(page, user_id, "cafe")
 
         write_url = f"https://cafe.naver.com/ArticleWrite.nhn?search.clubid={clubid}&search.menuid={menuid}"
         emit(f"{user_id}: [happybean] 카페 글쓰기 이동 (clubid={clubid} menuid={menuid})")
@@ -3760,7 +3777,7 @@ async def write_naver_cafe_post(
         except Exception:
             pass
         if "권한" in body_text[:500] or ("가입" in body_text[:500] and "카페" in body_text[:500]):
-            return False, "카페 게시판 쓰기 권한이 없습니다"
+            return False, "카페 게시판 쓰기 권한이 없습니다", await _happybean_screenshot(page, user_id, "cafe")
 
         # 카페 제목: iframe 포함 최대 15초 retry
         cafe_title_frame = None
@@ -3787,7 +3804,6 @@ async def write_naver_cafe_post(
             await asyncio.sleep(2)
 
         if not cafe_title_filled:
-            # 진단 로그
             diag = []
             for frame in page.frames:
                 try:
@@ -3797,16 +3813,7 @@ async def write_naver_cafe_post(
                 except Exception:
                     pass
             emit(f"{user_id}: [happybean] 카페 제목 진단: {diag}")
-            try:
-                import os, time as _time
-                ss_dir = "/data/tmp"
-                os.makedirs(ss_dir, exist_ok=True)
-                ss_path = f"{ss_dir}/happybean_cafe_{user_id}_{int(_time.time())}.png"
-                await page.screenshot(path=ss_path, full_page=True)
-                emit(f"{user_id}: [happybean] 스크린샷 저장: {ss_path}")
-            except Exception:
-                pass
-            return False, "제목 입력란을 찾지 못했습니다"
+            return False, "제목 입력란을 찾지 못했습니다", await _happybean_screenshot(page, user_id, "cafe")
         await asyncio.sleep(0.5)
 
         # 본문: 제목을 찾은 frame 우선 시도
@@ -3850,29 +3857,29 @@ async def write_naver_cafe_post(
 
         if not content_filled:
             if not await _happybean_fill_content(page, content, user_id, emit):
-                return False, "본문 에디터를 찾지 못했습니다"
+                return False, "본문 에디터를 찾지 못했습니다", await _happybean_screenshot(page, user_id, "cafe")
         await asyncio.sleep(1)
 
         if not await _happybean_submit(page, user_id, emit, is_blog=False):
-            return False, "등록 버튼을 찾지 못했습니다"
+            return False, "등록 버튼을 찾지 못했습니다", await _happybean_screenshot(page, user_id, "cafe")
         await page.wait_for_timeout(3000)
 
         current_url = page.url
         if "ArticleRead" in current_url or "articleid" in current_url.lower():
-            return True, "카페 글 작성 완료"
+            return True, "카페 글 작성 완료", await _happybean_screenshot(page, user_id, "cafe")
 
         try:
             body_text = await page.locator("body").inner_text(timeout=3000)
             if "이미 오늘" in body_text or "하루 1회" in body_text or "중복" in body_text:
-                return False, "오늘 이미 작성한 게시글이 있습니다"
+                return False, "오늘 이미 작성한 게시글이 있습니다", await _happybean_screenshot(page, user_id, "cafe")
         except Exception:
             pass
 
-        return True, f"카페 글 제출 완료 (url={current_url})"
+        return True, f"카페 글 제출 완료 (url={current_url})", await _happybean_screenshot(page, user_id, "cafe")
 
     except Exception as e:
         emit(f"{user_id}: [happybean] 카페 글쓰기 오류: {e}")
-        return False, f"오류: {e}"
+        return False, f"오류: {e}", ""
 
 
 async def write_naver_blog_post(
@@ -3881,8 +3888,8 @@ async def write_naver_blog_post(
     content: str,
     user_id: str,
     emit: Callable,
-) -> tuple[bool, str]:
-    """네이버 블로그에 글 작성. (성공여부, 메시지) 반환."""
+) -> tuple[bool, str, str]:
+    """네이버 블로그에 글 작성. (성공여부, 메시지, 스크린샷경로) 반환."""
     try:
         # 신형 URL 우선 시도
         for blog_write_url in [
@@ -3897,7 +3904,7 @@ async def write_naver_blog_post(
                 break
 
         if "nid.naver.com" in current_url or "login" in current_url.lower():
-            return False, "로그인이 필요합니다"
+            return False, "로그인이 필요합니다", await _happybean_screenshot(page, user_id, "blog")
 
         # 블로그 제목: 모든 frame에서 최대 15초 retry
         blog_title_filled = False
@@ -3943,39 +3950,30 @@ async def write_naver_blog_post(
                 except Exception:
                     pass
             emit(f"{user_id}: [happybean] 블로그 제목 진단: {diag}")
-            try:
-                import os, time as _time
-                ss_dir = "/data/tmp"
-                os.makedirs(ss_dir, exist_ok=True)
-                ss_path = f"{ss_dir}/happybean_blog_{user_id}_{int(_time.time())}.png"
-                await page.screenshot(path=ss_path, full_page=True)
-                emit(f"{user_id}: [happybean] 스크린샷 저장: {ss_path}")
-            except Exception:
-                pass
-            return False, "블로그 제목 입력란을 찾지 못했습니다"
+            return False, "블로그 제목 입력란을 찾지 못했습니다", await _happybean_screenshot(page, user_id, "blog")
 
         await asyncio.sleep(0.5)
 
         if not await _happybean_fill_content(page, content, user_id, emit):
-            return False, "블로그 본문 에디터를 찾지 못했습니다"
+            return False, "블로그 본문 에디터를 찾지 못했습니다", await _happybean_screenshot(page, user_id, "blog")
         await asyncio.sleep(1)
 
         if not await _happybean_submit(page, user_id, emit, is_blog=True):
-            return False, "발행 버튼을 찾지 못했습니다"
+            return False, "발행 버튼을 찾지 못했습니다", await _happybean_screenshot(page, user_id, "blog")
         await page.wait_for_timeout(3000)
 
         try:
             body_text = await page.locator("body").inner_text(timeout=3000)
             if "이미 오늘" in body_text or "하루 1회" in body_text:
-                return False, "오늘 이미 작성한 블로그 글이 있습니다"
+                return False, "오늘 이미 작성한 블로그 글이 있습니다", await _happybean_screenshot(page, user_id, "blog")
         except Exception:
             pass
 
-        return True, "블로그 글 발행 완료"
+        return True, "블로그 글 발행 완료", await _happybean_screenshot(page, user_id, "blog")
 
     except Exception as e:
         emit(f"{user_id}: [happybean] 블로그 글쓰기 오류: {e}")
-        return False, f"오류: {e}"
+        return False, f"오류: {e}", ""
 
 
 async def run_happybean_for_account(
@@ -4008,7 +4006,7 @@ async def run_happybean_for_account(
         try:
             # 카페 글쓰기
             emit(f"{account.user_id}: [happybean] 카페 글쓰기 시작")
-            cafe_ok, cafe_msg = await write_naver_cafe_post(
+            cafe_ok, cafe_msg, cafe_ss = await write_naver_cafe_post(
                 page,
                 HAPPYBEAN_CAFE_URL,
                 HAPPYBEAN_CAFE_BOARD,
@@ -4022,6 +4020,7 @@ async def run_happybean_for_account(
                 action="cafe",
                 status="success" if cafe_ok else "error",
                 message=cafe_msg,
+                screenshot_path=cafe_ss,
             ))
             emit(f"{account.user_id}: [happybean] 카페 - {'성공' if cafe_ok else '실패'}: {cafe_msg}")
 
@@ -4029,7 +4028,7 @@ async def run_happybean_for_account(
 
             # 블로그 글쓰기
             emit(f"{account.user_id}: [happybean] 블로그 글쓰기 시작")
-            blog_ok, blog_msg = await write_naver_blog_post(
+            blog_ok, blog_msg, blog_ss = await write_naver_blog_post(
                 page,
                 HAPPYBEAN_POST_TITLE,
                 HAPPYBEAN_POST_CONTENT,
@@ -4041,6 +4040,7 @@ async def run_happybean_for_account(
                 action="blog",
                 status="success" if blog_ok else "error",
                 message=blog_msg,
+                screenshot_path=blog_ss,
             ))
             emit(f"{account.user_id}: [happybean] 블로그 - {'성공' if blog_ok else '실패'}: {blog_msg}")
 
@@ -4088,6 +4088,7 @@ async def run_happybean(config: RunConfig, log: Optional[Callable] = None) -> Ha
                         action=detail.action,
                         status=detail.status,
                         message=detail.message,
+                        screenshot_path=detail.screenshot_path,
                     ))
             result.status = "completed"
             emit("[happybean] 전체 완료")
@@ -4153,5 +4154,6 @@ def _happybean_detail_to_dict(row: HappybeanDetail):
         "action": row.action,
         "status": row.status,
         "message": row.message or "",
+        "screenshot_path": getattr(row, "screenshot_path", "") or "",
         "created_at": _fmt(row.created_at),
     }

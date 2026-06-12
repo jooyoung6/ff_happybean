@@ -108,7 +108,7 @@
                 <th>계정</th>
                 <th>구분</th>
                 <th>상태</th>
-                <th>메시지</th>
+                <th>스크린샷</th>
                 <th>시각</th>
               </tr>
             </thead>
@@ -122,8 +122,45 @@
   </div>
 </div>
 
+<!-- 스크린샷 모달 -->
+<div class="modal fade" id="ss_modal" tabindex="-1" role="dialog">
+  <div class="modal-dialog modal-lg" role="document">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title">스크린샷</h6>
+        <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+      </div>
+      <div class="modal-body text-center p-1">
+        <img id="ss_modal_img" src="" style="max-width:100%;height:auto" />
+      </div>
+    </div>
+  </div>
+</div>
+
 <script type="text/javascript">
 var happybeanRunRequesting = false;
+
+function getStatusBadge(r) {
+  if (r.status === 'success') {
+    return '<span class="badge badge-success">성공</span>';
+  }
+  var msg = r.message || '';
+  if (msg.indexOf('제목') !== -1) {
+    return '<span class="badge badge-danger">글쓰기(제목입력) 실패</span>';
+  }
+  if (msg.indexOf('배너') !== -1) {
+    return '<span class="badge badge-danger">배너 누르기 실패</span>';
+  }
+  return '<span class="badge badge-danger">실패</span>';
+}
+
+function makeSsCell(ssPath) {
+  if (!ssPath) return '<td class="text-muted text-center">-</td>';
+  return '<td class="text-center">'
+    + '<button class="btn btn-sm btn-outline-secondary ss-thumb-btn" data-sspath="' + ssPath + '" style="padding:2px 6px">'
+    + '<small>🖼 보기</small></button>'
+    + '</td>';
+}
 
 $("body").on('click', '#refresh_btn', function(e) {
   e.preventDefault();
@@ -158,20 +195,30 @@ $("body").on('click', '.happybean-run-row', function() {
     } else {
       rows.forEach(function(r) {
         var actionLabel = r.action === 'cafe' ? '카페' : r.action === 'blog' ? '블로그' : r.action;
-        var badge = r.status === 'success'
-          ? '<span class="badge badge-success">성공</span>'
-          : '<span class="badge badge-danger">실패</span>';
         html += '<tr>'
           + '<td>' + (r.user_id || '') + '</td>'
           + '<td>' + actionLabel + '</td>'
-          + '<td>' + badge + '</td>'
-          + '<td>' + (r.message || '') + '</td>'
+          + '<td>' + getStatusBadge(r) + '</td>'
+          + makeSsCell(r.screenshot_path || '')
           + '<td>' + (r.created_at || '') + '</td>'
           + '</tr>';
       });
     }
     $('#happybean_detail_tbody').html(html);
     $('#happybean_detail_area').show();
+  });
+});
+
+$("body").on('click', '.ss-thumb-btn', function() {
+  var ssPath = $(this).data('sspath');
+  if (!ssPath) return;
+  var $btn = $(this);
+  $btn.prop('disabled', true).text('로딩중...');
+  globalSendCommand('happybean_screenshot', ssPath, null, null, function(ret) {
+    $btn.prop('disabled', false).html('<small>🖼 보기</small>');
+    if (ret.ret !== 'success') { notify('스크린샷 로드 실패', 'warning'); return; }
+    $('#ss_modal_img').attr('src', 'data:image/png;base64,' + ret.data);
+    $('#ss_modal').modal('show');
   });
 });
 </script>
