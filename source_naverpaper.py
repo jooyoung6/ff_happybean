@@ -3752,7 +3752,7 @@ async def write_naver_cafe_post(
         write_url = f"https://cafe.naver.com/ArticleWrite.nhn?search.clubid={clubid}&search.menuid={menuid}"
         emit(f"{user_id}: [happybean] 카페 글쓰기 이동 (clubid={clubid} menuid={menuid})")
         await page.goto(write_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(5000)
 
         body_text = ""
         try:
@@ -3762,12 +3762,86 @@ async def write_naver_cafe_post(
         if "권한" in body_text[:500] or ("가입" in body_text[:500] and "카페" in body_text[:500]):
             return False, "카페 게시판 쓰기 권한이 없습니다"
 
-        if not await _happybean_fill_title(page, title, user_id, emit):
+        # 카페 제목: iframe 포함 최대 15초 retry
+        cafe_title_frame = None
+        cafe_title_filled = False
+        for attempt in range(6):
+            for frame in page.frames:
+                try:
+                    for sel in ["textarea.textarea_input", "textarea[placeholder*='제목']"]:
+                        loc = frame.locator(sel).first
+                        if await loc.count() > 0:
+                            await loc.click()
+                            await asyncio.sleep(0.2)
+                            await loc.fill(title)
+                            emit(f"{user_id}: [happybean] 카페 제목 입력 완료 (시도{attempt+1})")
+                            cafe_title_frame = frame
+                            cafe_title_filled = True
+                            break
+                except Exception:
+                    pass
+                if cafe_title_filled:
+                    break
+            if cafe_title_filled:
+                break
+            await asyncio.sleep(2)
+
+        if not cafe_title_filled:
+            # 진단 로그
+            diag = []
+            for frame in page.frames:
+                try:
+                    n_ta = await frame.locator("textarea").count()
+                    n_inp = await frame.locator("input[type='text']").count()
+                    diag.append(f"[{frame.url[:50]}] textarea={n_ta} input={n_inp}")
+                except Exception:
+                    pass
+            emit(f"{user_id}: [happybean] 카페 제목 진단: {diag}")
             return False, "제목 입력란을 찾지 못했습니다"
         await asyncio.sleep(0.5)
 
-        if not await _happybean_fill_content(page, content, user_id, emit):
-            return False, "본문 에디터를 찾지 못했습니다"
+        # 본문: 제목을 찾은 frame 우선 시도
+        content_filled = False
+        target_frames = ([cafe_title_frame] + [f for f in page.frames if f is not cafe_title_frame]) if cafe_title_frame else page.frames
+        for frame in target_frames:
+            try:
+                injected = await frame.evaluate(
+                    """(text) => {
+                        const skip = new Set(['INPUT', 'TEXTAREA']);
+                        const eds = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+                        const targets = eds.filter(ed => {
+                            if (skip.has(ed.tagName)) return false;
+                            const ph = (ed.getAttribute('data-placeholder') || '').trim();
+                            return ph !== '제목';
+                        });
+                        targets.sort((a, b) => {
+                            const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+                            return (rb.width * rb.height) - (ra.width * ra.height);
+                        });
+                        for (const ed of targets) {
+                            const rect = ed.getBoundingClientRect();
+                            if (rect.width < 80 || rect.height < 20) continue;
+                            ed.focus();
+                            document.execCommand('selectAll', false, null);
+                            document.execCommand('delete', false, null);
+                            document.execCommand('insertText', false, text);
+                            ed.dispatchEvent(new Event('input', { bubbles: true }));
+                            return true;
+                        }
+                        return false;
+                    }""",
+                    content,
+                )
+                if injected:
+                    emit(f"{user_id}: [happybean] 카페 본문 입력 완료")
+                    content_filled = True
+                    break
+            except Exception:
+                pass
+
+        if not content_filled:
+            if not await _happybean_fill_content(page, content, user_id, emit):
+                return False, "본문 에디터를 찾지 못했습니다"
         await asyncio.sleep(1)
 
         if not await _happybean_submit(page, user_id, emit, is_blog=False):
@@ -3801,38 +3875,66 @@ async def write_naver_blog_post(
 ) -> tuple[bool, str]:
     """네이버 블로그에 글 작성. (성공여부, 메시지) 반환."""
     try:
-        blog_write_url = "https://blog.naver.com/PostWriteForm.naver"
-        emit(f"{user_id}: [happybean] 블로그 글쓰기 이동")
-        await page.goto(blog_write_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(3000)
+        # 신형 URL 우선 시도
+        for blog_write_url in [
+            f"https://blog.naver.com/{user_id}/postwrite",
+            "https://blog.naver.com/PostWriteForm.naver",
+        ]:
+            emit(f"{user_id}: [happybean] 블로그 글쓰기 이동 ({blog_write_url})")
+            await page.goto(blog_write_url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(5000)
+            current_url = page.url
+            if "nid.naver.com" not in current_url and "login" not in current_url.lower():
+                break
 
-        current_url = page.url
         if "nid.naver.com" in current_url or "login" in current_url.lower():
             return False, "로그인이 필요합니다"
 
-        if not await _happybean_fill_title(page, title, user_id, emit):
-            # 블로그 전용 선택자 추가 시도
-            blog_title_selectors = [
-                ".blog_title input",
-                "#entry-title",
-                "input.title",
-                "input[id*='title' i]",
-                ".title_area input",
-            ]
-            filled = False
-            for selector in blog_title_selectors:
+        # 블로그 제목: 모든 frame에서 최대 15초 retry
+        blog_title_filled = False
+        for attempt in range(6):
+            for frame in page.frames:
                 try:
-                    loc = page.locator(selector).first
-                    if await loc.count() > 0:
-                        await loc.click()
-                        await loc.fill(title)
-                        emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 ({selector})")
-                        filled = True
-                        break
+                    for sel in [
+                        "div[contenteditable='true'][data-placeholder='제목']",
+                        ".se-title-input[contenteditable='true']",
+                        "[contenteditable='true'][data-placeholder*='제목']",
+                        "textarea.textarea_input",
+                        "textarea[placeholder*='제목']",
+                        "input[placeholder*='제목']",
+                    ]:
+                        loc = frame.locator(sel).first
+                        if await loc.count() > 0:
+                            tag = await loc.evaluate("el => el.tagName")
+                            is_ce = await loc.get_attribute("contenteditable")
+                            await loc.click()
+                            await asyncio.sleep(0.3)
+                            if is_ce:
+                                await loc.type(title, delay=30)
+                            else:
+                                await loc.fill(title)
+                            emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (시도{attempt+1} {sel})")
+                            blog_title_filled = True
+                            break
                 except Exception:
                     pass
-            if not filled:
-                return False, "블로그 제목 입력란을 찾지 못했습니다"
+                if blog_title_filled:
+                    break
+            if blog_title_filled:
+                break
+            await asyncio.sleep(2)
+
+        if not blog_title_filled:
+            diag = []
+            for frame in page.frames:
+                try:
+                    n_ce = await frame.locator("[contenteditable='true']").count()
+                    n_inp = await frame.locator("input, textarea").count()
+                    diag.append(f"[{frame.url[:50]}] ce={n_ce} inp={n_inp}")
+                except Exception:
+                    pass
+            emit(f"{user_id}: [happybean] 블로그 제목 진단: {diag}")
+            return False, "블로그 제목 입력란을 찾지 못했습니다"
 
         await asyncio.sleep(0.5)
 
