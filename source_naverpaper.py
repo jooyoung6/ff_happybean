@@ -3465,15 +3465,8 @@ def _fmt(value):
 
 async def _happybean_fill_title(page, title: str, user_id: str, emit: Callable) -> bool:
     """게시물 제목 입력. True 반환 시 성공."""
-    selectors = [
-        "input[name='subject']",
-        "#subject",
-        "input.title_input",
-        "input[placeholder*='제목']",
-        ".entry_title input",
-        "input[type='text']",
-    ]
-    for selector in selectors:
+    # 1. textarea (카페 현행 UI: textarea.textarea_input)
+    for selector in ["textarea.textarea_input", "textarea[placeholder*='제목']"]:
         try:
             loc = page.locator(selector).first
             if await loc.count() > 0:
@@ -3484,11 +3477,42 @@ async def _happybean_fill_title(page, title: str, user_id: str, emit: Callable) 
                 return True
         except Exception:
             pass
-    # 프레임 내부에서도 시도
+
+    # 2. contenteditable div (블로그 SmartEditor ONE)
+    for selector in [
+        "div[contenteditable='true'][data-placeholder='제목']",
+        ".se-title-input[contenteditable='true']",
+        "[contenteditable='true'][data-placeholder*='제목']",
+    ]:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0:
+                await loc.click()
+                await asyncio.sleep(0.3)
+                await loc.type(title, delay=30)
+                emit(f"{user_id}: [happybean] 제목 입력 완료 ({selector})")
+                return True
+        except Exception:
+            pass
+
+    # 3. input 폴백
+    for selector in ["input[name='subject']", "#subject", "input.title_input", "input[placeholder*='제목']"]:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0:
+                await loc.click()
+                await asyncio.sleep(0.2)
+                await loc.fill(title)
+                emit(f"{user_id}: [happybean] 제목 입력 완료 ({selector})")
+                return True
+        except Exception:
+            pass
+
+    # 4. 프레임 내부
     for frame in page.frames:
         if frame is page.main_frame:
             continue
-        for selector in selectors:
+        for selector in ["textarea.textarea_input", "textarea[placeholder*='제목']", "input[placeholder*='제목']"]:
             try:
                 loc = frame.locator(selector).first
                 if await loc.count() > 0:
@@ -3502,36 +3526,26 @@ async def _happybean_fill_title(page, title: str, user_id: str, emit: Callable) 
 
 
 async def _happybean_fill_content(page, content: str, user_id: str, emit: Callable) -> bool:
-    """SmartEditor (모든 버전) 본문 입력. True 반환 시 성공."""
-    # SmartEditor ONE - contenteditable div
-    se_selectors = [
-        ".se-content[contenteditable='true']",
-        ".se-content p",
-        ".ProseMirror[contenteditable='true']",
-        "[contenteditable='true'].se-content",
-    ]
-    for selector in se_selectors:
-        try:
-            loc = page.locator(selector).first
-            if await loc.count() > 0:
-                await loc.click()
-                await asyncio.sleep(0.3)
-                await page.keyboard.type(content, delay=50)
-                emit(f"{user_id}: [happybean] 본문 입력 완료 (SE ONE)")
-                return True
-        except Exception:
-            pass
-
-    # JavaScript execCommand로 contenteditable 채우기
+    """SmartEditor ONE/2 본문 입력. True 반환 시 성공."""
+    # 1. JS로 제목 제외한 contenteditable 중 가장 큰 것에 입력 (SE ONE 카페/블로그 공통)
     try:
         injected = await page.evaluate(
             """(text) => {
                 const skip = new Set(['INPUT', 'TEXTAREA']);
                 const eds = Array.from(document.querySelectorAll('[contenteditable="true"]'));
-                for (const ed of eds) {
-                    if (skip.has(ed.tagName)) continue;
+                const targets = eds.filter(ed => {
+                    if (skip.has(ed.tagName)) return false;
+                    const ph = (ed.getAttribute('data-placeholder') || '').trim();
+                    if (ph === '제목') return false;
+                    return true;
+                });
+                targets.sort((a, b) => {
+                    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+                    return (rb.width * rb.height) - (ra.width * ra.height);
+                });
+                for (const ed of targets) {
                     const rect = ed.getBoundingClientRect();
-                    if (rect.width < 80 || rect.height < 40) continue;
+                    if (rect.width < 80 || rect.height < 20) continue;
                     ed.focus();
                     document.execCommand('selectAll', false, null);
                     document.execCommand('delete', false, null);
@@ -3544,12 +3558,31 @@ async def _happybean_fill_content(page, content: str, user_id: str, emit: Callab
             content,
         )
         if injected:
-            emit(f"{user_id}: [happybean] 본문 입력 완료 (execCommand)")
+            emit(f"{user_id}: [happybean] 본문 입력 완료 (SE ONE JS)")
             return True
     except Exception:
         pass
 
-    # SmartEditor2 - iframe body 방식
+    # 2. Playwright locator로 contenteditable 클릭 후 타이핑
+    for selector in [
+        "div[contenteditable='true']:not([data-placeholder='제목'])",
+        ".se-content[contenteditable='true']",
+        "[contenteditable='true'][role='textbox']",
+    ]:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0:
+                await loc.click()
+                await asyncio.sleep(0.3)
+                await page.keyboard.press("Control+A")
+                await asyncio.sleep(0.1)
+                await page.keyboard.type(content, delay=30)
+                emit(f"{user_id}: [happybean] 본문 입력 완료 ({selector})")
+                return True
+        except Exception:
+            pass
+
+    # 3. SmartEditor2 iframe body
     for frame in page.frames:
         if frame is page.main_frame:
             continue
@@ -3577,18 +3610,40 @@ async def _happybean_fill_content(page, content: str, user_id: str, emit: Callab
     return False
 
 
-async def _happybean_submit(page, user_id: str, emit: Callable) -> bool:
+async def _happybean_submit(page, user_id: str, emit: Callable, is_blog: bool = False) -> bool:
     """등록/발행 버튼 클릭. True 반환 시 성공."""
-    submit_css = [
-        "button.btn_register",
-        "button[type='submit']",
-        "input[type='submit']",
-        "a.btn_register",
-        ".publish_area button",
-        "button.publish_btn",
-        "button.se-btn-publish",
-    ]
-    for selector in submit_css:
+    # 텍스트 기반 버튼 검색 (카페: 등록, 블로그: 발행/글쓰기)
+    search_texts = ["발행", "글쓰기", "등록"] if is_blog else ["등록", "발행", "게시"]
+    for text in search_texts:
+        try:
+            loc = page.locator("button, a").filter(has_text=text).first
+            if await loc.count() > 0:
+                box = await loc.bounding_box()
+                if box and box["width"] > 0:
+                    await loc.click(timeout=5000, force=True)
+                    emit(f"{user_id}: [happybean] 제출 클릭 (text={text})")
+                    # 블로그: 발행 확인 다이얼로그 처리
+                    if is_blog:
+                        await asyncio.sleep(1.5)
+                        for frame in page.frames:
+                            try:
+                                for dlg_sel in [
+                                    ".layer_popup__i0QOY button:has-text('발행')",
+                                    "button:has-text('발행'):visible",
+                                ]:
+                                    dlg_loc = frame.locator(dlg_sel).first
+                                    if await dlg_loc.count() > 0:
+                                        await dlg_loc.click(force=True, timeout=3000)
+                                        emit(f"{user_id}: [happybean] 발행 다이얼로그 확인")
+                                        break
+                            except Exception:
+                                pass
+                    return True
+        except Exception:
+            pass
+
+    # CSS 셀렉터 폴백
+    for selector in ["button.btn_register", ".publish_area button", "button.publish_btn", "button[type='submit']"]:
         try:
             loc = page.locator(selector).first
             if await loc.count() > 0:
@@ -3598,17 +3653,17 @@ async def _happybean_submit(page, user_id: str, emit: Callable) -> bool:
         except Exception:
             pass
 
-    for text in ["등록", "발행", "게시", "완료", "저장", "올리기"]:
-        try:
-            loc = page.locator("button, a").filter(has_text=text).first
-            if await loc.count() > 0:
-                box = await loc.bounding_box()
-                if box and box["width"] > 0:
-                    await loc.click(timeout=5000, force=True)
-                    emit(f"{user_id}: [happybean] 제출 클릭 (text={text})")
+    # 프레임 내 버튼 검색
+    for idx, frame in enumerate(page.frames):
+        for text in (["발행", "글쓰기"] if is_blog else ["등록"]):
+            try:
+                btn_loc = frame.locator(f"button:has-text('{text}'):visible").first
+                if await btn_loc.count() > 0:
+                    await btn_loc.click(timeout=5000, force=True)
+                    emit(f"{user_id}: [happybean] 제출 클릭 (frame{idx} text={text})")
                     return True
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     return False
 
@@ -3715,7 +3770,7 @@ async def write_naver_cafe_post(
             return False, "본문 에디터를 찾지 못했습니다"
         await asyncio.sleep(1)
 
-        if not await _happybean_submit(page, user_id, emit):
+        if not await _happybean_submit(page, user_id, emit, is_blog=False):
             return False, "등록 버튼을 찾지 못했습니다"
         await page.wait_for_timeout(3000)
 
@@ -3785,7 +3840,7 @@ async def write_naver_blog_post(
             return False, "블로그 본문 에디터를 찾지 못했습니다"
         await asyncio.sleep(1)
 
-        if not await _happybean_submit(page, user_id, emit):
+        if not await _happybean_submit(page, user_id, emit, is_blog=True):
             return False, "발행 버튼을 찾지 못했습니다"
         await page.wait_for_timeout(3000)
 
