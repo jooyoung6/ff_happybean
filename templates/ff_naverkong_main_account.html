@@ -704,7 +704,7 @@ $("#np_image_popup").on("click", function(e) {
   e.preventDefault();
   var src = $("#np_image_modal_img").attr("src");
   if (!src) return;
-  var win = window.open("", "ff_naverpaper_login_preview", "width=720,height=980,scrollbars=yes,resizable=yes");
+  var win = window.open("", "ff_naverkong_login_preview", "width=720,height=980,scrollbars=yes,resizable=yes");
   if (!win) return;
   win.document.open();
   win.document.write('<!doctype html><html><head><title>Naver Login Preview</title><style>body{margin:0;background:#222;text-align:center;}img{width:780px;max-width:none;background:#fff;}</style></head><body><img src="' + src + '"></body></html>');

@@ -5,7 +5,7 @@ setting = {
     "home_module": None,
     "menu": {
         "uri": __package__,
-        "name": "네이버 폐지줍기",
+        "name": "콩받기",
         "list": [
             {"uri": "main/setting", "name": "설정"},
             {"uri": "main/account", "name": "계정"},
