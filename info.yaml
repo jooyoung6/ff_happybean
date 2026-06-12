@@ -1,6 +1,6 @@
 title: "콩받기"
-version: "0.0.5"
-package_name: "ff_naverkong"
+version: "0.0.6"
+package_name: "ff_happybean"
 developer: "악휘라 & 스카J"
 description: "네이버 해피빈 자동 콩받기 + 네이버페이 포인트 수집"
 home: "https://gitlab.com/jung01471/ff_naverpaper"
