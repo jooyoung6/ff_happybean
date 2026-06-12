@@ -5,7 +5,7 @@
 <div class="alert alert-warning">Required packages are missing. Open the package install menu and install all required packages. ({{ arg['dependency_error'] }})</div>
 {% endif %}
 
-{{ macros.m_button_group([['refresh_btn', '새로고침']]) }}
+{{ macros.m_button_group([['refresh_btn', '새로고침'], ['run_happybean_btn', '콩받기 지금 실행']]) }}
 {{ macros.m_row_start('5') }}
 {{ macros.m_row_end() }}
 
@@ -62,10 +62,117 @@
   </div>
 </div>
 
+<div class="card mb-3">
+  <div class="card-header">해피빈 콩받기 결과</div>
+  <div class="card-body">
+    {% if arg.get('happybean_runs') %}
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0" id="happybean_run_table">
+          <thead>
+            <tr>
+              <th style="width:6%">ID</th>
+              <th style="width:18%">시작</th>
+              <th style="width:18%">종료</th>
+              <th style="width:8%">계정수</th>
+              <th style="width:10%">상태</th>
+              <th style="width:40%">메시지</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for row in arg['happybean_runs'] %}
+            <tr class="happybean-run-row" data-run-id="{{ row.id }}" style="cursor:pointer">
+              <td>{{ row.id }}</td>
+              <td>{{ row.started_at }}</td>
+              <td>{{ row.finished_at }}</td>
+              <td>{{ row.account_count }}</td>
+              <td>
+                {% if row.status == 'completed' %}<span class="badge badge-success">완료</span>
+                {% elif row.status == 'error' %}<span class="badge badge-danger">오류</span>
+                {% elif row.status == 'running' %}<span class="badge badge-warning">실행중</span>
+                {% else %}<span class="badge badge-secondary">{{ row.status }}</span>{% endif %}
+              </td>
+              <td class="text-truncate" style="max-width:0">{{ row.message }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6" class="text-muted text-center p-3">해피빈 콩받기 실행 기록이 없습니다.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div id="happybean_detail_area" class="mt-3" style="display:none">
+        <h6 class="mb-2">상세 결과 (실행 ID: <span id="happybean_detail_run_id"></span>)</h6>
+        <div class="table-responsive">
+          <table class="table table-sm table-hover mb-0">
+            <thead>
+              <tr>
+                <th>계정</th>
+                <th>구분</th>
+                <th>상태</th>
+                <th>메시지</th>
+                <th>시각</th>
+              </tr>
+            </thead>
+            <tbody id="happybean_detail_tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    {% else %}
+      <div class="text-muted text-center p-3">해피빈 콩받기 실행 기록이 없습니다.</div>
+    {% endif %}
+  </div>
+</div>
+
 <script type="text/javascript">
+var happybeanRunRequesting = false;
+
 $("body").on('click', '#refresh_btn', function(e) {
   e.preventDefault();
   location.reload();
+});
+
+$("body").on('click', '#run_happybean_btn', function(e) {
+  e.preventDefault();
+  if (happybeanRunRequesting) return;
+  happybeanRunRequesting = true;
+  $('#run_happybean_btn').prop('disabled', true);
+  globalSendCommand('run_happybean_now', null, null, null, function(ret) {
+    happybeanRunRequesting = false;
+    $('#run_happybean_btn').prop('disabled', false);
+    if (ret.ret === 'success') {
+      notify(ret.msg || '해피빈 콩받기 시작', 'success');
+    } else {
+      notify(ret.msg || '실행 시작 실패', 'warning');
+    }
+  });
+});
+
+$("body").on('click', '.happybean-run-row', function() {
+  var runId = $(this).data('run-id');
+  $('#happybean_detail_run_id').text(runId);
+  globalSendCommand('happybean_run_details', runId, null, null, function(ret) {
+    if (ret.ret !== 'success') { notify(ret.msg || '상세 조회 실패', 'warning'); return; }
+    var rows = ret.data || [];
+    var html = '';
+    if (rows.length === 0) {
+      html = '<tr><td colspan="5" class="text-muted text-center">상세 기록이 없습니다.</td></tr>';
+    } else {
+      rows.forEach(function(r) {
+        var actionLabel = r.action === 'cafe' ? '카페' : r.action === 'blog' ? '블로그' : r.action;
+        var badge = r.status === 'success'
+          ? '<span class="badge badge-success">성공</span>'
+          : '<span class="badge badge-danger">실패</span>';
+        html += '<tr>'
+          + '<td>' + (r.user_id || '') + '</td>'
+          + '<td>' + actionLabel + '</td>'
+          + '<td>' + badge + '</td>'
+          + '<td>' + (r.message || '') + '</td>'
+          + '<td>' + (r.created_at || '') + '</td>'
+          + '</tr>';
+      });
+    }
+    $('#happybean_detail_tbody').html(html);
+    $('#happybean_detail_area').show();
+  });
 });
 </script>
 

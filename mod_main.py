@@ -45,6 +45,8 @@ class ModuleMain(PluginModuleBase):
     install_jobs_lock = threading.Lock()
     collection_lock = threading.Lock()
     collection_running = False
+    happybean_lock = threading.Lock()
+    happybean_running = False
 
     SOURCE_DEPENDENCY_KEYS = ("aiohttp", "beautifulsoup4", "playwright", "playwright-stealth", "SQLAlchemy")
 
@@ -65,6 +67,8 @@ class ModuleMain(PluginModuleBase):
             "proxy_reward_enabled": "",
             "proxy_login_enabled": "False",
             "proxy_url": "",
+            "happybean_schedule_enabled": "False",
+            "happybean_schedule": "0 9 * * *",
         }
         self._source_warning_logged = False
 
@@ -72,6 +76,7 @@ class ModuleMain(PluginModuleBase):
         try:
             self._ensure_dirs()
             self._sync_scheduler()
+            self._sync_happybean_scheduler()
         except Exception as e:
             P.logger.error(f"Exception:{str(e)}")
             P.logger.error(traceback.format_exc())
@@ -134,6 +139,7 @@ class ModuleMain(PluginModuleBase):
             arg["runs"] = np_module.recent_runs(self._db_path(), 50) if np_module else []
             profile_order = [item.get("user_id") for item in arg["profiles"] if item.get("user_id")]
             arg["run_account_tabs"] = np_module.recent_run_account_tabs(self._db_path(), 50, profile_order) if np_module else []
+            arg["happybean_runs"] = np_module.recent_happybean_runs(self._db_path(), 30) if np_module else []
         return render_template(f"{P.package_name}_{self.name}_{sub}.html", arg=arg)
 
     def process_command(self, command, arg1, arg2, arg3, req):
@@ -183,6 +189,16 @@ class ModuleMain(PluginModuleBase):
                 return jsonify({"ret": "success", "data": self._dependency_status()})
             if command == "install_jobs":
                 return jsonify(self._install_job_status())
+            if command == "run_happybean_now":
+                return jsonify(self._start_happybean_run_background())
+            if command == "sync_happybean_scheduler":
+                return jsonify(self._sync_happybean_scheduler(arg1, arg2))
+            if command == "happybean_run_details":
+                warning = self._source_dependency_warning()
+                if warning:
+                    return jsonify(warning)
+                run_id = int(str(arg1 or "0").strip() or "0")
+                return jsonify({"ret": "success", "data": self._np().happybean_run_details(self._db_path(), run_id)})
             return jsonify({"ret": "warning", "msg": f"unsupported command: {command}"})
         except Exception as e:
             P.logger.error(f"Exception:{str(e)}")
@@ -317,6 +333,88 @@ class ModuleMain(PluginModuleBase):
             keep_user_days=self._int_setting("keep_user_days", 7),
         )
         return np_module.run_sync(config, log=lambda msg: P.logger.info(f"[NaverPaper] {msg}"))
+
+    def happybean_scheduler_function(self):
+        if not self._mark_happybean_running():
+            P.logger.info("[NaverPaper] happybean already running; scheduled run skipped")
+            return
+        try:
+            self._run_happybean_now()
+        except Exception:
+            P.logger.error(traceback.format_exc())
+        finally:
+            self._mark_happybean_finished()
+
+    def _start_happybean_run_background(self):
+        warning = self._source_dependency_warning()
+        if warning:
+            return warning
+        if not self._accounts():
+            return {"ret": "warning", "msg": "Naver account profile is empty"}
+        if not self._mark_happybean_running():
+            return {"ret": "warning", "msg": "해피빈 콩받기가 이미 실행 중입니다"}
+        thread = threading.Thread(target=self._happybean_run_background, daemon=True)
+        thread.start()
+        return {"ret": "success", "msg": "해피빈 콩받기를 백그라운드로 시작했습니다.", "data": {"status": "RUNNING"}}
+
+    def _happybean_run_background(self):
+        try:
+            self._run_happybean_now()
+        except Exception:
+            P.logger.error(traceback.format_exc())
+        finally:
+            self._mark_happybean_finished()
+
+    def _run_happybean_now(self):
+        np_module = self._np()
+        self._ensure_dirs()
+        accounts = self._accounts()
+        if not accounts:
+            raise ValueError("Naver account profile is empty")
+        config = np_module.RunConfig(
+            db_path=self._db_path(),
+            cookie_dir=self._cookie_dir(),
+            accounts=accounts,
+            login_proxy_url=self._login_proxy_url(),
+        )
+        result = np_module.run_happybean_sync(config, log=lambda msg: P.logger.info(f"[NaverPaper] {msg}"))
+        P.logger.info(
+            "[NaverPaper] happybean finished accounts=%s details=%s",
+            result.account_count,
+            len(result.details),
+        )
+        return result
+
+    def _mark_happybean_running(self):
+        with self.happybean_lock:
+            if self.happybean_running:
+                return False
+            self.happybean_running = True
+            return True
+
+    def _mark_happybean_finished(self):
+        with self.happybean_lock:
+            self.happybean_running = False
+
+    def _sync_happybean_scheduler(self, enabled_override=None, schedule_override=None):
+        if enabled_override is not None:
+            enabled_text = str(enabled_override).strip().lower()
+            P.ModelSetting.set("happybean_schedule_enabled", "True" if enabled_text in ("true", "1", "on", "yes") else "False")
+        if schedule_override is not None:
+            P.ModelSetting.set("happybean_schedule", str(schedule_override or "").strip())
+
+        job_id = self._happybean_job_id()
+        if F.scheduler.is_include(job_id):
+            F.scheduler.remove_job(job_id)
+
+        enabled = self._bool_setting("happybean_schedule_enabled", False)
+        schedule = str(P.ModelSetting.get("happybean_schedule") or "").strip()
+        if enabled and schedule:
+            F.scheduler.add_job_instance(Job(P.package_name, job_id, schedule, self.happybean_scheduler_function, "해피빈 콩받기"))
+        return {"ret": "success", "scheduler_active": F.scheduler.is_include(job_id)}
+
+    def _happybean_job_id(self):
+        return f"{P.package_name}_happybean"
 
     def _sync_scheduler(self, enabled_override=None, schedule_override=None):
         if enabled_override is not None:

@@ -43,6 +43,11 @@ NAVERPAY_MAIN_URL = "https://point.pay.naver.com/pc/main"
 NAVERPAY_MISSION_DETAIL_URL = "https://point.pay.naver.com/pc/mission-detail?dataType=category&rank=20&pageKey=all"
 PINCRUX_SOURCE_URL_PREFIX = "https://external-token.pay.naver.com"
 
+HAPPYBEAN_CAFE_URL = "https://cafe.naver.com/sdckong"
+HAPPYBEAN_CAFE_BOARD = "자유게시판"
+HAPPYBEAN_POST_TITLE = "콩"
+HAPPYBEAN_POST_CONTENT = "콩"
+
 LOGIN_SESSION_TTL = 300
 _login_sessions = {}
 _login_sessions_lock = threading.Lock()
@@ -144,6 +149,30 @@ class RunAccountSummary(Base):
     run = relationship("RunHistory")
 
 
+class HappybeanRun(Base):
+    __tablename__ = "happybean_run"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    started_at = Column(DateTime, default=datetime.now)
+    finished_at = Column(DateTime)
+    status = Column(String, default="running")
+    account_count = Column(Integer, default=0)
+    message = Column(Text, default="")
+
+
+class HappybeanDetail(Base):
+    __tablename__ = "happybean_detail"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("happybean_run.id"))
+    user_id = Column(String, default="")
+    action = Column(String, default="")
+    status = Column(String, default="")
+    message = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.now)
+    run = relationship("HappybeanRun")
+
+
 class Database:
     def __init__(self, db_path: str):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -218,6 +247,24 @@ class RunResult:
     message: str = ""
     details: list[DetailResult] = field(default_factory=list)
     account_results: list = field(default_factory=list)
+
+
+@dataclass
+class HappybeanDetailResult:
+    user_id: str = ""
+    action: str = ""
+    status: str = ""
+    message: str = ""
+
+
+@dataclass
+class HappybeanRunResult:
+    started_at: datetime = field(default_factory=datetime.now)
+    finished_at: Optional[datetime] = None
+    status: str = "running"
+    account_count: int = 0
+    message: str = ""
+    details: list[HappybeanDetailResult] = field(default_factory=list)
 
 
 def parse_accounts(ids_text: str, passwords_text: str) -> list[AccountConfig]:
@@ -3412,3 +3459,524 @@ def _fmt(value):
     if not value:
         return ""
     return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ===== HAPPYBEAN (해피빈 콩받기) =====
+
+async def _happybean_fill_title(page, title: str, user_id: str, emit: Callable) -> bool:
+    """게시물 제목 입력. True 반환 시 성공."""
+    selectors = [
+        "input[name='subject']",
+        "#subject",
+        "input.title_input",
+        "input[placeholder*='제목']",
+        ".entry_title input",
+        "input[type='text']",
+    ]
+    for selector in selectors:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0:
+                await loc.click()
+                await asyncio.sleep(0.2)
+                await loc.fill(title)
+                emit(f"{user_id}: [happybean] 제목 입력 완료 ({selector})")
+                return True
+        except Exception:
+            pass
+    # 프레임 내부에서도 시도
+    for frame in page.frames:
+        if frame is page.main_frame:
+            continue
+        for selector in selectors:
+            try:
+                loc = frame.locator(selector).first
+                if await loc.count() > 0:
+                    await loc.click()
+                    await loc.fill(title)
+                    emit(f"{user_id}: [happybean] 제목 입력 완료 (frame {selector})")
+                    return True
+            except Exception:
+                pass
+    return False
+
+
+async def _happybean_fill_content(page, content: str, user_id: str, emit: Callable) -> bool:
+    """SmartEditor (모든 버전) 본문 입력. True 반환 시 성공."""
+    # SmartEditor ONE - contenteditable div
+    se_selectors = [
+        ".se-content[contenteditable='true']",
+        ".se-content p",
+        ".ProseMirror[contenteditable='true']",
+        "[contenteditable='true'].se-content",
+    ]
+    for selector in se_selectors:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0:
+                await loc.click()
+                await asyncio.sleep(0.3)
+                await page.keyboard.type(content, delay=50)
+                emit(f"{user_id}: [happybean] 본문 입력 완료 (SE ONE)")
+                return True
+        except Exception:
+            pass
+
+    # JavaScript execCommand로 contenteditable 채우기
+    try:
+        injected = await page.evaluate(
+            """(text) => {
+                const skip = new Set(['INPUT', 'TEXTAREA']);
+                const eds = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+                for (const ed of eds) {
+                    if (skip.has(ed.tagName)) continue;
+                    const rect = ed.getBoundingClientRect();
+                    if (rect.width < 80 || rect.height < 40) continue;
+                    ed.focus();
+                    document.execCommand('selectAll', false, null);
+                    document.execCommand('delete', false, null);
+                    document.execCommand('insertText', false, text);
+                    ed.dispatchEvent(new Event('input', { bubbles: true }));
+                    return true;
+                }
+                return false;
+            }""",
+            content,
+        )
+        if injected:
+            emit(f"{user_id}: [happybean] 본문 입력 완료 (execCommand)")
+            return True
+    except Exception:
+        pass
+
+    # SmartEditor2 - iframe body 방식
+    for frame in page.frames:
+        if frame is page.main_frame:
+            continue
+        try:
+            is_editable = await frame.evaluate(
+                "() => !!(document.body && (document.body.contentEditable === 'true' || document.body.isContentEditable))"
+            )
+            if not is_editable:
+                continue
+            await frame.evaluate(
+                """(text) => {
+                    document.body.focus();
+                    document.execCommand('selectAll', false, null);
+                    document.execCommand('delete', false, null);
+                    document.execCommand('insertText', false, text);
+                    document.body.dispatchEvent(new Event('input', { bubbles: true }));
+                }""",
+                content,
+            )
+            emit(f"{user_id}: [happybean] 본문 입력 완료 (SmartEditor2 iframe)")
+            return True
+        except Exception:
+            pass
+
+    return False
+
+
+async def _happybean_submit(page, user_id: str, emit: Callable) -> bool:
+    """등록/발행 버튼 클릭. True 반환 시 성공."""
+    submit_css = [
+        "button.btn_register",
+        "button[type='submit']",
+        "input[type='submit']",
+        "a.btn_register",
+        ".publish_area button",
+        "button.publish_btn",
+        "button.se-btn-publish",
+    ]
+    for selector in submit_css:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0:
+                await loc.click(timeout=5000, force=True)
+                emit(f"{user_id}: [happybean] 제출 클릭 ({selector})")
+                return True
+        except Exception:
+            pass
+
+    for text in ["등록", "발행", "게시", "완료", "저장", "올리기"]:
+        try:
+            loc = page.locator("button, a").filter(has_text=text).first
+            if await loc.count() > 0:
+                box = await loc.bounding_box()
+                if box and box["width"] > 0:
+                    await loc.click(timeout=5000, force=True)
+                    emit(f"{user_id}: [happybean] 제출 클릭 (text={text})")
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
+async def write_naver_cafe_post(
+    page,
+    cafe_url: str,
+    board_name: str,
+    title: str,
+    content: str,
+    user_id: str,
+    emit: Callable,
+) -> tuple[bool, str]:
+    """네이버 카페 자유게시판에 글 작성. (성공여부, 메시지) 반환."""
+    try:
+        emit(f"{user_id}: [happybean] 카페 접속 중")
+        await page.goto(cafe_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        page_content = await page.content()
+
+        # club ID 추출
+        clubid = ""
+        for pattern in [
+            r"search\.clubid=(\d+)",
+            r'"clubid"\s*:\s*"?(\d+)',
+            r"clubId\s*[=:]\s*['\"]?(\d+)",
+        ]:
+            m = re.search(pattern, page_content, re.IGNORECASE)
+            if m:
+                clubid = m.group(1)
+                break
+
+        # 자유게시판 menu ID 추출 - 페이지 링크 검색
+        menuid = ""
+        all_links = await page.evaluate(
+            """() => Array.from(document.querySelectorAll('a[href]')).map(a => ({
+                text: (a.innerText || a.textContent || '').trim(),
+                href: a.href || ''
+            }))"""
+        )
+        for link_info in all_links:
+            if board_name in str(link_info.get("text") or ""):
+                href = str(link_info.get("href") or "")
+                for pat in [r"menuid=(\d+)", r"menuid%3D(\d+)"]:
+                    m = re.search(pat, href, re.IGNORECASE)
+                    if not m:
+                        m = re.search(r"menuid=(\d+)", unquote(href), re.IGNORECASE)
+                    if m:
+                        menuid = m.group(1)
+                        break
+                if menuid:
+                    break
+
+        # 프레임 URL에서 club/menu ID 보완
+        if not clubid or not menuid:
+            for frame in page.frames:
+                if frame is page.main_frame:
+                    continue
+                try:
+                    frame_url = str(frame.url or "")
+                    if not clubid:
+                        m = re.search(r"clubid=(\d+)", frame_url, re.IGNORECASE)
+                        if m:
+                            clubid = m.group(1)
+                    if not menuid:
+                        m = re.search(r"menuid=(\d+)", frame_url, re.IGNORECASE)
+                        if m:
+                            menuid = m.group(1)
+                    if clubid and menuid:
+                        break
+                    if board_name in (await frame.content()):
+                        pat = rf"menuid=(\d+)[^>]*>{board_name}|{board_name}.*?menuid=(\d+)"
+                        m = re.search(pat, await frame.content(), re.DOTALL)
+                        if m:
+                            menuid = m.group(1) or m.group(2)
+                            break
+                except Exception:
+                    pass
+
+        if not clubid:
+            return False, "카페 club ID를 찾지 못했습니다"
+        if not menuid:
+            return False, f"'{board_name}' menu ID를 찾지 못했습니다"
+
+        write_url = f"https://cafe.naver.com/ArticleWrite.nhn?search.clubid={clubid}&search.menuid={menuid}"
+        emit(f"{user_id}: [happybean] 카페 글쓰기 이동 (clubid={clubid} menuid={menuid})")
+        await page.goto(write_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        body_text = ""
+        try:
+            body_text = await page.locator("body").inner_text(timeout=5000)
+        except Exception:
+            pass
+        if "권한" in body_text[:500] or ("가입" in body_text[:500] and "카페" in body_text[:500]):
+            return False, "카페 게시판 쓰기 권한이 없습니다"
+
+        if not await _happybean_fill_title(page, title, user_id, emit):
+            return False, "제목 입력란을 찾지 못했습니다"
+        await asyncio.sleep(0.5)
+
+        if not await _happybean_fill_content(page, content, user_id, emit):
+            return False, "본문 에디터를 찾지 못했습니다"
+        await asyncio.sleep(1)
+
+        if not await _happybean_submit(page, user_id, emit):
+            return False, "등록 버튼을 찾지 못했습니다"
+        await page.wait_for_timeout(3000)
+
+        current_url = page.url
+        if "ArticleRead" in current_url or "articleid" in current_url.lower():
+            return True, "카페 글 작성 완료"
+
+        try:
+            body_text = await page.locator("body").inner_text(timeout=3000)
+            if "이미 오늘" in body_text or "하루 1회" in body_text or "중복" in body_text:
+                return False, "오늘 이미 작성한 게시글이 있습니다"
+        except Exception:
+            pass
+
+        return True, f"카페 글 제출 완료 (url={current_url})"
+
+    except Exception as e:
+        emit(f"{user_id}: [happybean] 카페 글쓰기 오류: {e}")
+        return False, f"오류: {e}"
+
+
+async def write_naver_blog_post(
+    page,
+    title: str,
+    content: str,
+    user_id: str,
+    emit: Callable,
+) -> tuple[bool, str]:
+    """네이버 블로그에 글 작성. (성공여부, 메시지) 반환."""
+    try:
+        blog_write_url = "https://blog.naver.com/PostWriteForm.naver"
+        emit(f"{user_id}: [happybean] 블로그 글쓰기 이동")
+        await page.goto(blog_write_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        current_url = page.url
+        if "nid.naver.com" in current_url or "login" in current_url.lower():
+            return False, "로그인이 필요합니다"
+
+        if not await _happybean_fill_title(page, title, user_id, emit):
+            # 블로그 전용 선택자 추가 시도
+            blog_title_selectors = [
+                ".blog_title input",
+                "#entry-title",
+                "input.title",
+                "input[id*='title' i]",
+                ".title_area input",
+            ]
+            filled = False
+            for selector in blog_title_selectors:
+                try:
+                    loc = page.locator(selector).first
+                    if await loc.count() > 0:
+                        await loc.click()
+                        await loc.fill(title)
+                        emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 ({selector})")
+                        filled = True
+                        break
+                except Exception:
+                    pass
+            if not filled:
+                return False, "블로그 제목 입력란을 찾지 못했습니다"
+
+        await asyncio.sleep(0.5)
+
+        if not await _happybean_fill_content(page, content, user_id, emit):
+            return False, "블로그 본문 에디터를 찾지 못했습니다"
+        await asyncio.sleep(1)
+
+        if not await _happybean_submit(page, user_id, emit):
+            return False, "발행 버튼을 찾지 못했습니다"
+        await page.wait_for_timeout(3000)
+
+        try:
+            body_text = await page.locator("body").inner_text(timeout=3000)
+            if "이미 오늘" in body_text or "하루 1회" in body_text:
+                return False, "오늘 이미 작성한 블로그 글이 있습니다"
+        except Exception:
+            pass
+
+        return True, "블로그 글 발행 완료"
+
+    except Exception as e:
+        emit(f"{user_id}: [happybean] 블로그 글쓰기 오류: {e}")
+        return False, f"오류: {e}"
+
+
+async def run_happybean_for_account(
+    account: AccountConfig,
+    session_db,
+    cookie_dir: str,
+    emit: Callable,
+    login_proxy_url: str = "",
+) -> list[HappybeanDetailResult]:
+    """계정 1개에 대해 카페/블로그 글쓰기 후 결과 반환."""
+    from playwright.async_api import async_playwright
+    from playwright_stealth import Stealth
+
+    details = []
+    storage_state = await ensure_cookie_storage_state(account, session_db, cookie_dir, login_proxy_url, emit)
+    if not storage_state:
+        details.append(HappybeanDetailResult(user_id=account.user_id, action="all", status="error", message="쿠키 없음"))
+        return details
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=DESKTOP_UA,
+            locale="ko-KR",
+            viewport={"width": 1280, "height": 900},
+            storage_state=storage_state,
+        )
+        page = await context.new_page()
+        await Stealth().apply_stealth_async(page)
+        try:
+            # 카페 글쓰기
+            emit(f"{account.user_id}: [happybean] 카페 글쓰기 시작")
+            cafe_ok, cafe_msg = await write_naver_cafe_post(
+                page,
+                HAPPYBEAN_CAFE_URL,
+                HAPPYBEAN_CAFE_BOARD,
+                HAPPYBEAN_POST_TITLE,
+                HAPPYBEAN_POST_CONTENT,
+                account.user_id,
+                emit,
+            )
+            details.append(HappybeanDetailResult(
+                user_id=account.user_id,
+                action="cafe",
+                status="success" if cafe_ok else "error",
+                message=cafe_msg,
+            ))
+            emit(f"{account.user_id}: [happybean] 카페 - {'성공' if cafe_ok else '실패'}: {cafe_msg}")
+
+            await asyncio.sleep(2)
+
+            # 블로그 글쓰기
+            emit(f"{account.user_id}: [happybean] 블로그 글쓰기 시작")
+            blog_ok, blog_msg = await write_naver_blog_post(
+                page,
+                HAPPYBEAN_POST_TITLE,
+                HAPPYBEAN_POST_CONTENT,
+                account.user_id,
+                emit,
+            )
+            details.append(HappybeanDetailResult(
+                user_id=account.user_id,
+                action="blog",
+                status="success" if blog_ok else "error",
+                message=blog_msg,
+            ))
+            emit(f"{account.user_id}: [happybean] 블로그 - {'성공' if blog_ok else '실패'}: {blog_msg}")
+
+        finally:
+            await context.close()
+            await browser.close()
+
+    return details
+
+
+async def run_happybean(config: RunConfig, log: Optional[Callable] = None) -> HappybeanRunResult:
+    """모든 계정에 대해 해피빈 카페/블로그 글쓰기 실행."""
+    db = Database(config.db_path)
+    db.create_all()
+    result = HappybeanRunResult(account_count=len(config.accounts))
+
+    def emit(message: str):
+        if log:
+            log(message)
+
+    with db.get_session() as session_db:
+        history = HappybeanRun(
+            started_at=result.started_at,
+            status="running",
+            account_count=result.account_count,
+        )
+        session_db.add(history)
+        session_db.flush()
+
+        try:
+            emit("[happybean] 카페/블로그 글쓰기 시작")
+            for account in config.accounts:
+                account_details = await run_happybean_for_account(
+                    account,
+                    session_db,
+                    config.cookie_dir,
+                    emit,
+                    config.login_proxy_url,
+                )
+                result.details.extend(account_details)
+                for detail in account_details:
+                    session_db.add(HappybeanDetail(
+                        run_id=history.id,
+                        user_id=detail.user_id,
+                        action=detail.action,
+                        status=detail.status,
+                        message=detail.message,
+                    ))
+            result.status = "completed"
+            emit("[happybean] 전체 완료")
+        except Exception as e:
+            result.status = "error"
+            result.message = str(e)
+            emit(traceback.format_exc())
+        finally:
+            result.finished_at = datetime.now()
+            history.finished_at = result.finished_at
+            history.status = result.status
+            history.message = result.message
+
+    return result
+
+
+def run_happybean_sync(config: RunConfig, log: Optional[Callable] = None) -> HappybeanRunResult:
+    _cleanup_login_sessions_sync(log=log)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _run_coro_blocking(run_happybean(config, log=log))
+    return _run_async_in_thread(lambda: run_happybean(config, log=log))
+
+
+def recent_happybean_runs(db_path: str, limit: int = 30):
+    db = Database(db_path)
+    db.create_all()
+    with db.get_session() as session:
+        rows = session.query(HappybeanRun).order_by(HappybeanRun.id.desc()).limit(limit).all()
+        return [_happybean_run_to_dict(row) for row in rows]
+
+
+def happybean_run_details(db_path: str, run_id: int):
+    db = Database(db_path)
+    db.create_all()
+    with db.get_session() as session:
+        rows = (
+            session.query(HappybeanDetail)
+            .filter_by(run_id=run_id)
+            .order_by(HappybeanDetail.id.asc())
+            .all()
+        )
+        return [_happybean_detail_to_dict(row) for row in rows]
+
+
+def _happybean_run_to_dict(row: HappybeanRun):
+    return {
+        "id": row.id,
+        "started_at": _fmt(row.started_at),
+        "finished_at": _fmt(row.finished_at),
+        "status": row.status,
+        "account_count": row.account_count,
+        "message": row.message or "",
+    }
+
+
+def _happybean_detail_to_dict(row: HappybeanDetail):
+    return {
+        "id": row.id,
+        "run_id": row.run_id,
+        "user_id": row.user_id,
+        "action": row.action,
+        "status": row.status,
+        "message": row.message or "",
+        "created_at": _fmt(row.created_at),
+    }
