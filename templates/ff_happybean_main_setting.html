@@ -31,6 +31,8 @@
     {{ macros.m_tab_content_start('happybean', false) }}
     {{ macros.setting_checkbox('happybean_schedule_enabled', '자동 콩받기 활성화', value=arg['happybean_schedule_enabled'], desc=['매일 지정 시각에 카페·블로그 글쓰기 후 해피빈 콩을 자동으로 받습니다.']) }}
     {{ macros.setting_input_text('happybean_schedule', '실행 시간', value=arg['happybean_schedule'], desc=['크론 형식. 기본값: 0 9 * * * (매일 오전 9시)']) }}
+    {{ macros.setting_input_text('happybean_cafe_url', '카페 URL', value=arg['happybean_cafe_url'], desc=['글을 작성할 네이버 카페 주소. 예: https://cafe.naver.com/mycafe', '비워두면 기본값 사용']) }}
+    {{ macros.setting_checkbox('debug_no_headless', '디버그: 브라우저 창 표시 (headless=False)', value=arg['debug_no_headless'], desc=['ON이면 Chromium 창이 화면에 표시됩니다. 개발/디버그용 — 나스 운영 시에는 OFF로 두세요.']) }}
     <div class="row mt-2">
       <div class="col-md-4 offset-md-2">
         <button id="run_happybean_setting_btn" type="button" class="btn btn-sm btn-outline-primary">콩받기 지금 실행</button>
@@ -40,7 +42,7 @@
     <div class="row mt-2">
       <div class="col-md-10 offset-md-2">
         <small class="text-muted">
-          카페: <strong>cafe.naver.com/sdckong</strong> 자유게시판 / 제목·내용: <strong>콩</strong><br>
+          카페: 자유게시판 / 제목·내용: <strong>콩</strong><br>
           블로그: 내 블로그 / 제목·내용: <strong>콩</strong>
         </small>
       </div>

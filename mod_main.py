@@ -69,6 +69,8 @@ class ModuleMain(PluginModuleBase):
             "proxy_url": "",
             "happybean_schedule_enabled": "False",
             "happybean_schedule": "0 9 * * *",
+            "happybean_cafe_url": "",
+            "debug_no_headless": "False",
         }
         self._source_warning_logged = False
 
@@ -379,11 +381,15 @@ class ModuleMain(PluginModuleBase):
         accounts = self._accounts()
         if not accounts:
             raise ValueError("Naver account profile is empty")
+        cafe_url_override = str(P.ModelSetting.get("happybean_cafe_url") or "").strip()
+        if cafe_url_override:
+            np_module.HAPPYBEAN_CAFE_URL = cafe_url_override
         config = np_module.RunConfig(
             db_path=self._db_path(),
             cookie_dir=self._cookie_dir(),
             accounts=accounts,
             login_proxy_url=self._login_proxy_url(),
+            debug_no_headless=self._bool_setting("debug_no_headless", False),
         )
         result = np_module.run_happybean_sync(config, log=lambda msg: P.logger.info(f"[NaverPaper] {msg}"))
         P.logger.info(

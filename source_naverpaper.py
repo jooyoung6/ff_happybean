@@ -227,6 +227,7 @@ class RunConfig:
     no_paper_record: bool = False
     keep_campaign_days: int = 60
     keep_user_days: int = 7
+    debug_no_headless: bool = False
 
 
 @dataclass
@@ -3805,11 +3806,21 @@ async def write_naver_cafe_post(
 
         if not cafe_title_filled:
             diag = []
-            for frame in page.frames:
+            for fi, frame in enumerate(page.frames):
                 try:
                     n_ta = await frame.locator("textarea").count()
                     n_inp = await frame.locator("input[type='text']").count()
-                    diag.append(f"[{frame.url[:50]}] textarea={n_ta} input={n_inp}")
+                    n_ce = await frame.locator("[contenteditable='true']").count()
+                    diag.append(f"[frame{fi} {frame.url[:60]}] ta={n_ta} inp={n_inp} ce={n_ce}")
+                    try:
+                        import time as _time
+                        dump_path = f"/data/tmp/happybean_cafe_frame{fi}_{user_id}_{int(_time.time())}.html"
+                        html = await frame.content()
+                        with open(dump_path, "w", encoding="utf-8") as f:
+                            f.write(html)
+                        emit(f"{user_id}: [happybean] HTML덤프: {dump_path}")
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             emit(f"{user_id}: [happybean] 카페 제목 진단: {diag}")
@@ -3908,20 +3919,27 @@ async def write_naver_blog_post(
 
         # 블로그 제목: 모든 frame에서 최대 15초 retry
         blog_title_filled = False
+        blog_title_sel_used = ""
         for attempt in range(6):
             for frame in page.frames:
                 try:
                     for sel in [
+                        # SmartEditor ONE - input 방식
+                        "input.se-input-title",
+                        "input[placeholder='제목']",
+                        "input[placeholder*='제목']",
+                        "input[type='text']",
+                        # SmartEditor ONE - contenteditable 방식
+                        ".se-title-input [contenteditable='true']",
                         "div[contenteditable='true'][data-placeholder='제목']",
                         ".se-title-input[contenteditable='true']",
                         "[contenteditable='true'][data-placeholder*='제목']",
+                        # 구형 에디터
                         "textarea.textarea_input",
                         "textarea[placeholder*='제목']",
-                        "input[placeholder*='제목']",
                     ]:
                         loc = frame.locator(sel).first
                         if await loc.count() > 0:
-                            tag = await loc.evaluate("el => el.tagName")
                             is_ce = await loc.get_attribute("contenteditable")
                             await loc.click()
                             await asyncio.sleep(0.3)
@@ -3929,7 +3947,8 @@ async def write_naver_blog_post(
                                 await loc.type(title, delay=30)
                             else:
                                 await loc.fill(title)
-                            emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (시도{attempt+1} {sel})")
+                            blog_title_sel_used = sel
+                            emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (시도{attempt+1} sel={sel})")
                             blog_title_filled = True
                             break
                 except Exception:
@@ -3942,11 +3961,22 @@ async def write_naver_blog_post(
 
         if not blog_title_filled:
             diag = []
-            for frame in page.frames:
+            for fi, frame in enumerate(page.frames):
                 try:
                     n_ce = await frame.locator("[contenteditable='true']").count()
-                    n_inp = await frame.locator("input, textarea").count()
-                    diag.append(f"[{frame.url[:50]}] ce={n_ce} inp={n_inp}")
+                    n_inp = await frame.locator("input").count()
+                    n_ta = await frame.locator("textarea").count()
+                    diag.append(f"[frame{fi} {frame.url[:60]}] ce={n_ce} inp={n_inp} ta={n_ta}")
+                    # HTML 덤프 저장
+                    try:
+                        import time as _time
+                        dump_path = f"/data/tmp/happybean_blog_frame{fi}_{user_id}_{int(_time.time())}.html"
+                        html = await frame.content()
+                        with open(dump_path, "w", encoding="utf-8") as f:
+                            f.write(html)
+                        emit(f"{user_id}: [happybean] HTML덤프: {dump_path}")
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             emit(f"{user_id}: [happybean] 블로그 제목 진단: {diag}")
@@ -3982,6 +4012,7 @@ async def run_happybean_for_account(
     cookie_dir: str,
     emit: Callable,
     login_proxy_url: str = "",
+    headless: bool = True,
 ) -> list[HappybeanDetailResult]:
     """계정 1개에 대해 카페/블로그 글쓰기 후 결과 반환."""
     from playwright.async_api import async_playwright
@@ -3994,7 +4025,7 @@ async def run_happybean_for_account(
         return details
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.chromium.launch(headless=headless)
         context = await browser.new_context(
             user_agent=DESKTOP_UA,
             locale="ko-KR",
@@ -4079,6 +4110,7 @@ async def run_happybean(config: RunConfig, log: Optional[Callable] = None) -> Ha
                     config.cookie_dir,
                     emit,
                     config.login_proxy_url,
+                    headless=not config.debug_no_headless,
                 )
                 result.details.extend(account_details)
                 for detail in account_details:
