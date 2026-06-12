@@ -3797,6 +3797,15 @@ async def write_naver_cafe_post(
                 except Exception:
                     pass
             emit(f"{user_id}: [happybean] 카페 제목 진단: {diag}")
+            try:
+                import os, time as _time
+                ss_dir = "/data/tmp"
+                os.makedirs(ss_dir, exist_ok=True)
+                ss_path = f"{ss_dir}/happybean_cafe_{user_id}_{int(_time.time())}.png"
+                await page.screenshot(path=ss_path, full_page=True)
+                emit(f"{user_id}: [happybean] 스크린샷 저장: {ss_path}")
+            except Exception:
+                pass
             return False, "제목 입력란을 찾지 못했습니다"
         await asyncio.sleep(0.5)
 
@@ -3934,6 +3943,15 @@ async def write_naver_blog_post(
                 except Exception:
                     pass
             emit(f"{user_id}: [happybean] 블로그 제목 진단: {diag}")
+            try:
+                import os, time as _time
+                ss_dir = "/data/tmp"
+                os.makedirs(ss_dir, exist_ok=True)
+                ss_path = f"{ss_dir}/happybean_blog_{user_id}_{int(_time.time())}.png"
+                await page.screenshot(path=ss_path, full_page=True)
+                emit(f"{user_id}: [happybean] 스크린샷 저장: {ss_path}")
+            except Exception:
+                pass
             return False, "블로그 제목 입력란을 찾지 못했습니다"
 
         await asyncio.sleep(0.5)
