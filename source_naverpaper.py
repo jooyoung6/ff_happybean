@@ -3961,15 +3961,15 @@ async def write_naver_blog_post(
         # 블로그 에디터 전체가 iframe[name="mainFrame"] 안에 있음
         mf = page.frame_locator('iframe[name="mainFrame"]')
 
-        # 도움말 패널 닫기
+        # 도움말 패널 닫기 (처음 실행 시만 표시됨)
         try:
             close_btn = mf.get_by_role("button", name="닫기")
-            if await close_btn.count() > 0:
-                await close_btn.click()
-                await asyncio.sleep(0.5)
-                emit(f"{user_id}: [happybean] 도움말 패널 닫기 완료")
-        except Exception as e:
-            emit(f"{user_id}: [happybean] 도움말 닫기 스킵: {e}")
+            await close_btn.wait_for(state="visible", timeout=5000)
+            await close_btn.click()
+            await asyncio.sleep(0.5)
+            emit(f"{user_id}: [happybean] 도움말 패널 닫기 완료")
+        except Exception:
+            emit(f"{user_id}: [happybean] 도움말 패널 없음 (스킵)")
 
         # 제목 입력: iframe 안의 span.se-placeholder (제목) 클릭 후 키보드 입력
         title_filled = False
@@ -4027,11 +4027,11 @@ async def write_naver_blog_post(
         # 발행 버튼 (iframe 안)
         submitted = False
         try:
-            pub_btn = mf.locator("div.publish_btn_area__KjA2i button").first
-            if await pub_btn.count() > 0:
-                await pub_btn.click()
-                submitted = True
-                emit(f"{user_id}: [happybean] 발행 버튼 클릭")
+            pub_btn = mf.get_by_role("button", name="발행")
+            await pub_btn.wait_for(state="visible", timeout=5000)
+            await pub_btn.click()
+            submitted = True
+            emit(f"{user_id}: [happybean] 발행 버튼 클릭")
         except Exception as e:
             emit(f"{user_id}: [happybean] 발행 버튼 실패: {e}")
 
