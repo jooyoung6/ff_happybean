@@ -3885,87 +3885,45 @@ async def write_naver_blog_post(
             ss = await _happybean_screenshot(page, user_id, "blog")
             return False, "로그인이 필요합니다", ss, bean_empty
 
-        # 도움말 패널 닫기 (자동으로 열리면 클릭 방해)
-        help_closed = False
-        for close_sel in [
-            "button[aria-label='닫기']",
-            "button[aria-label='Close']",
-            ".help_close",
-            "button.se-help-panel-close",
-            ".se-help-panel button",
-            "button.se-help-panel__close",
-            "[class*='help'] button",
-            "[class*='Help'] button",
-        ]:
-            try:
-                btn = page.locator(close_sel).first
-                if await btn.count() > 0:
-                    await btn.click()
-                    await asyncio.sleep(0.5)
-                    emit(f"{user_id}: [happybean] 도움말 닫기 ({close_sel})")
-                    help_closed = True
-                    break
-            except Exception:
-                pass
+        # 블로그 에디터 전체가 iframe[name="mainFrame"] 안에 있음
+        mf = page.frame_locator('iframe[name="mainFrame"]')
 
-        if not help_closed:
-            # JS로 도움말 관련 버튼 직접 탐색 후 클릭
-            try:
-                closed = await page.evaluate("""() => {
-                    const sels = [
-                        '[class*="help"] button',
-                        '[class*="Help"] button',
-                        '[class*="panel"] button[class*="close"]',
-                        '[class*="panel"] button[class*="Close"]',
-                    ];
-                    for (const s of sels) {
-                        const btn = document.querySelector(s);
-                        if (btn) { btn.click(); return s; }
-                    }
-                    return null;
-                }""")
-                if closed:
-                    emit(f"{user_id}: [happybean] 도움말 JS 닫기: {closed}")
-                    await asyncio.sleep(0.5)
-            except Exception:
-                pass
-
-        # Escape 키로도 시도
+        # 도움말 패널 닫기
         try:
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.3)
-        except Exception:
-            pass
+            close_btn = mf.get_by_role("button", name="닫기")
+            if await close_btn.count() > 0:
+                await close_btn.click()
+                await asyncio.sleep(0.5)
+                emit(f"{user_id}: [happybean] 도움말 패널 닫기 완료")
+        except Exception as e:
+            emit(f"{user_id}: [happybean] 도움말 닫기 스킵: {e}")
 
-        # 제목 입력: JS로 제목 contenteditable 찾아서 focus 후 키보드 입력
+        # 제목 입력: iframe 안의 span.se-placeholder (제목) 클릭 후 키보드 입력
         title_filled = False
         for attempt in range(5):
             try:
-                focused = await page.evaluate("""() => {
-                    // se-placeholder "제목" 텍스트의 부모 contenteditable 찾기
-                    const placeholders = document.querySelectorAll('span.se-placeholder');
-                    for (const ph of placeholders) {
-                        if (ph.textContent.trim() === '제목' || ph.textContent.includes('제목을')) {
-                            const ce = ph.closest('[contenteditable="true"]');
-                            if (ce) { ce.click(); ce.focus(); return 'placeholder'; }
-                        }
-                    }
-                    // se-title-input 영역
-                    const titleInput = document.querySelector('.se-title-input [contenteditable="true"]');
-                    if (titleInput) { titleInput.click(); titleInput.focus(); return 'title-input'; }
-                    // 첫 번째 contenteditable
-                    const first = document.querySelector('[contenteditable="true"]');
-                    if (first) { first.click(); first.focus(); return 'first-ce'; }
-                    return null;
-                }""")
-                if focused:
-                    await asyncio.sleep(0.4)
+                title_ph = mf.locator("span.se-placeholder").filter(has_text="제목").first
+                if await title_ph.count() > 0:
+                    await title_ph.click()
+                    await asyncio.sleep(0.3)
                     await page.keyboard.type(title, delay=30)
                     title_filled = True
-                    emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (JS focus={focused})")
+                    emit(f"{user_id}: [happybean] 블로그 제목 입력 완료")
+                    break
+            except Exception:
+                pass
+            # 폴백: iframe 안의 첫 번째 contenteditable
+            try:
+                first_ce = mf.locator("[contenteditable='true']").first
+                if await first_ce.count() > 0:
+                    await first_ce.click()
+                    await asyncio.sleep(0.3)
+                    await page.keyboard.type(title, delay=30)
+                    title_filled = True
+                    emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (fallback)")
                     break
             except Exception as e:
-                emit(f"{user_id}: [happybean] 제목 JS 실패 attempt{attempt+1}: {e}")
+                emit(f"{user_id}: [happybean] 제목 실패 attempt{attempt+1}: {e}")
             await asyncio.sleep(2)
 
         if not title_filled:
@@ -3974,40 +3932,18 @@ async def write_naver_blog_post(
 
         await asyncio.sleep(0.5)
 
-        # 본문 입력: JS로 본문 contenteditable 찾아서 focus 후 키보드 입력
+        # 본문 입력: iframe 안의 span.se-placeholder (본문 영역) 클릭 후 키보드 입력
         content_filled = False
         try:
-            focused = await page.evaluate("""() => {
-                // se-placeholder 중 제목 아닌 것 (본문 영역)
-                const placeholders = document.querySelectorAll('span.se-placeholder');
-                for (const ph of placeholders) {
-                    const txt = ph.textContent.trim();
-                    if (txt !== '제목' && !txt.includes('제목을')) {
-                        const ce = ph.closest('[contenteditable="true"]');
-                        if (ce) { ce.click(); ce.focus(); return 'content-placeholder'; }
-                    }
-                }
-                // contenteditable 중 제목이 아닌 가장 큰 것
-                const ces = Array.from(document.querySelectorAll('[contenteditable="true"]'));
-                ces.sort((a, b) => {
-                    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
-                    return (rb.width * rb.height) - (ra.width * ra.height);
-                });
-                for (const ce of ces) {
-                    const rect = ce.getBoundingClientRect();
-                    if (rect.width > 200 && rect.height > 100) {
-                        ce.click(); ce.focus(); return 'largest-ce';
-                    }
-                }
-                return null;
-            }""")
-            if focused:
-                await asyncio.sleep(0.4)
+            content_ph = mf.locator("span.se-placeholder").first
+            if await content_ph.count() > 0:
+                await content_ph.click()
+                await asyncio.sleep(0.3)
                 await page.keyboard.type(content, delay=20)
                 content_filled = True
-                emit(f"{user_id}: [happybean] 블로그 본문 입력 완료 (JS focus={focused})")
+                emit(f"{user_id}: [happybean] 블로그 본문 입력 완료")
         except Exception as e:
-            emit(f"{user_id}: [happybean] 본문 JS 실패: {e}")
+            emit(f"{user_id}: [happybean] 본문 실패: {e}")
 
         if not content_filled:
             if not await _happybean_fill_content(page, content, user_id, emit):
@@ -4015,10 +3951,10 @@ async def write_naver_blog_post(
                 return False, "블로그 본문 에디터를 찾지 못했습니다", ss, bean_empty
         await asyncio.sleep(1)
 
-        # 발행 버튼 클릭
+        # 발행 버튼 (iframe 안)
         submitted = False
         try:
-            pub_btn = page.locator("div.publish_btn_area__KjA2i button").first
+            pub_btn = mf.locator("div.publish_btn_area__KjA2i button").first
             if await pub_btn.count() > 0:
                 await pub_btn.click()
                 submitted = True
@@ -4033,9 +3969,9 @@ async def write_naver_blog_post(
 
         await page.wait_for_timeout(2000)
 
-        # 발행 확인 다이얼로그
+        # 발행 확인 다이얼로그 (iframe 안)
         try:
-            dlg_btn = page.locator("div.layer_btn_area__UzyKH i").first
+            dlg_btn = mf.locator("div.layer_btn_area__UzyKH i").first
             if await dlg_btn.count() > 0:
                 await dlg_btn.click()
                 emit(f"{user_id}: [happybean] 발행 확인 다이얼로그 클릭")
