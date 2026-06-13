@@ -3744,10 +3744,10 @@ async def write_naver_cafe_post(
         await page.goto(write_url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
 
-        # 권한 확인
+        # 권한 확인 (명확한 오류 페이지만 차단)
         try:
             body_text = await page.locator("body").inner_text(timeout=3000)
-            if "권한" in body_text[:500] or ("가입" in body_text[:500] and "카페" in body_text[:500]):
+            if "가입하셔야" in body_text[:500] or "가입 후 이용" in body_text[:500] or "이 카페는" in body_text[:200]:
                 ss = await _happybean_screenshot(page, user_id, "cafe")
                 return False, "카페 게시판 쓰기 권한이 없습니다", ss, bean_empty
         except Exception:
@@ -3869,40 +3869,52 @@ async def write_naver_blog_post(
             ss = await _happybean_screenshot(page, user_id, "blog")
             return False, "로그인이 필요합니다", ss, bean_empty
 
-        # 제목 입력: 제목 placeholder 클릭 후 키보드 입력
+        # 도움말 패널 닫기 (자동으로 열리면 클릭 방해)
+        try:
+            for close_sel in [
+                "button[aria-label='닫기']",
+                ".help_close",
+                "button.se-help-panel-close",
+                ".se-help-panel button",
+            ]:
+                btn = page.locator(close_sel).first
+                if await btn.count() > 0:
+                    await btn.click()
+                    await asyncio.sleep(0.5)
+                    emit(f"{user_id}: [happybean] 도움말 패널 닫기")
+                    break
+        except Exception:
+            pass
+
+        # 제목 입력: JS로 제목 contenteditable 찾아서 focus 후 키보드 입력
         title_filled = False
         for attempt in range(5):
             try:
-                # "제목" placeholder가 있는 span 먼저 시도
-                title_ph = page.locator("span.se-placeholder").filter(has_text="제목").first
-                if await title_ph.count() > 0:
-                    await title_ph.click()
-                    await asyncio.sleep(0.3)
+                focused = await page.evaluate("""() => {
+                    // se-placeholder "제목" 텍스트의 부모 contenteditable 찾기
+                    const placeholders = document.querySelectorAll('span.se-placeholder');
+                    for (const ph of placeholders) {
+                        if (ph.textContent.trim() === '제목' || ph.textContent.includes('제목을')) {
+                            const ce = ph.closest('[contenteditable="true"]');
+                            if (ce) { ce.click(); ce.focus(); return 'placeholder'; }
+                        }
+                    }
+                    // se-title-input 영역
+                    const titleInput = document.querySelector('.se-title-input [contenteditable="true"]');
+                    if (titleInput) { titleInput.click(); titleInput.focus(); return 'title-input'; }
+                    // 첫 번째 contenteditable
+                    const first = document.querySelector('[contenteditable="true"]');
+                    if (first) { first.click(); first.focus(); return 'first-ce'; }
+                    return null;
+                }""")
+                if focused:
+                    await asyncio.sleep(0.4)
                     await page.keyboard.type(title, delay=30)
                     title_filled = True
-                    emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (placeholder 방식)")
+                    emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (JS focus={focused})")
                     break
-            except Exception:
-                pass
-            # contenteditable 제목 영역 폴백
-            try:
-                for sel in [
-                    ".se-title-input [contenteditable='true']",
-                    "[contenteditable='true'][data-placeholder*='제목']",
-                    "div[contenteditable='true']",
-                ]:
-                    loc = page.locator(sel).first
-                    if await loc.count() > 0:
-                        await loc.click()
-                        await asyncio.sleep(0.3)
-                        await page.keyboard.type(title, delay=30)
-                        title_filled = True
-                        emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (sel={sel})")
-                        break
-            except Exception:
-                pass
-            if title_filled:
-                break
+            except Exception as e:
+                emit(f"{user_id}: [happybean] 제목 JS 실패 attempt{attempt+1}: {e}")
             await asyncio.sleep(2)
 
         if not title_filled:
@@ -3911,18 +3923,40 @@ async def write_naver_blog_post(
 
         await asyncio.sleep(0.5)
 
-        # 본문 입력: 본문 placeholder 클릭 후 키보드 입력
+        # 본문 입력: JS로 본문 contenteditable 찾아서 focus 후 키보드 입력
         content_filled = False
         try:
-            content_ph = page.locator("span.se-placeholder").first
-            if await content_ph.count() > 0:
-                await content_ph.click()
-                await asyncio.sleep(0.3)
+            focused = await page.evaluate("""() => {
+                // se-placeholder 중 제목 아닌 것 (본문 영역)
+                const placeholders = document.querySelectorAll('span.se-placeholder');
+                for (const ph of placeholders) {
+                    const txt = ph.textContent.trim();
+                    if (txt !== '제목' && !txt.includes('제목을')) {
+                        const ce = ph.closest('[contenteditable="true"]');
+                        if (ce) { ce.click(); ce.focus(); return 'content-placeholder'; }
+                    }
+                }
+                // contenteditable 중 제목이 아닌 가장 큰 것
+                const ces = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+                ces.sort((a, b) => {
+                    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+                    return (rb.width * rb.height) - (ra.width * ra.height);
+                });
+                for (const ce of ces) {
+                    const rect = ce.getBoundingClientRect();
+                    if (rect.width > 200 && rect.height > 100) {
+                        ce.click(); ce.focus(); return 'largest-ce';
+                    }
+                }
+                return null;
+            }""")
+            if focused:
+                await asyncio.sleep(0.4)
                 await page.keyboard.type(content, delay=20)
                 content_filled = True
-                emit(f"{user_id}: [happybean] 블로그 본문 입력 완료 (placeholder 방식)")
+                emit(f"{user_id}: [happybean] 블로그 본문 입력 완료 (JS focus={focused})")
         except Exception as e:
-            emit(f"{user_id}: [happybean] 본문 placeholder 실패: {e}")
+            emit(f"{user_id}: [happybean] 본문 JS 실패: {e}")
 
         if not content_filled:
             if not await _happybean_fill_content(page, content, user_id, emit):
