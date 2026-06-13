@@ -79,7 +79,7 @@ async def main():
         await Stealth().apply_stealth_async(page)
 
         print("\n=== 카페 글쓰기 테스트 ===")
-        ok, msg, ss = await write_naver_cafe_post(
+        ok, msg, ss, (bean_ok, bean_msg, bean_ss) = await write_naver_cafe_post(
             page, CAFE_URL, HAPPYBEAN_CAFE_BOARD,
             HAPPYBEAN_POST_TITLE, HAPPYBEAN_POST_CONTENT,
             USER_ID, emit,
@@ -87,17 +87,23 @@ async def main():
         print(f"결과: {'성공' if ok else '실패'} / {msg}")
         if ss:
             print(f"스크린샷: {ss}")
+        print(f"콩받기: {bean_msg}")
+        if bean_ss:
+            print(f"콩받기 스크린샷: {bean_ss}")
 
         await asyncio.sleep(2)
 
         print("\n=== 블로그 글쓰기 테스트 ===")
-        ok2, msg2, ss2 = await write_naver_blog_post(
+        ok2, msg2, ss2, (_, bean_msg2, bean_ss2) = await write_naver_blog_post(
             page, HAPPYBEAN_POST_TITLE, HAPPYBEAN_POST_CONTENT,
             USER_ID, emit,
         )
         print(f"결과: {'성공' if ok2 else '실패'} / {msg2}")
         if ss2:
             print(f"스크린샷: {ss2}")
+        print(f"콩받기: {bean_msg2}")
+        if bean_ss2:
+            print(f"콩받기 스크린샷: {bean_ss2}")
 
         if not HEADLESS:
             print("\n창을 닫으려면 Enter 키를 누르세요...")
