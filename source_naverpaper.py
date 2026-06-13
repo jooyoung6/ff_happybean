@@ -47,6 +47,7 @@ HAPPYBEAN_CAFE_URL = "https://cafe.naver.com/sdckong"
 HAPPYBEAN_CAFE_BOARD = "자유게시판"
 HAPPYBEAN_POST_TITLE = "콩"
 HAPPYBEAN_POST_CONTENT = "콩"
+BLOG_HOME_URL = "https://section.blog.naver.com/BlogHome.naver?directoryNo=0&currentPage=1&groupId=0"
 
 LOGIN_SESSION_TTL = 300
 _login_sessions = {}
@@ -3702,6 +3703,78 @@ async def _check_happybean_banner(page, user_id: str, emit: Callable) -> tuple[b
         return False, "콩받기 배너 안떴다", ss
 
 
+async def _collect_blog_home_beans(page, user_id: str, emit: Callable) -> tuple[bool, str, str]:
+    """블로그 홈 해피빈 배너 콩받기.
+    플로팅 아이콘에 호버 → '클릭하고 기부콩' 버튼 노출 → 팝업 클릭 → 닫기.
+    새 배너가 없을 때까지 새로고침하며 반복.
+    """
+    try:
+        emit(f"{user_id}: [happybean] 블로그 홈 콩받기 시작")
+        await page.goto(BLOG_HOME_URL, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(2000)
+
+        clicked = set()
+        collected = 0
+
+        for _ in range(15):
+            # #floatingda_content 안의 플로팅 배너 아이콘들
+            floating_items = page.locator("#floatingda_content > *")
+            count = await floating_items.count()
+
+            new_clicked = False
+            for i in range(count):
+                item = floating_items.nth(i)
+                try:
+                    item_key = (await item.inner_text()).strip()[:120]
+                except Exception:
+                    item_key = str(i)
+                if item_key in clicked:
+                    continue
+
+                try:
+                    # 호버하여 콩받기 버튼 노출
+                    await item.hover()
+                    await asyncio.sleep(0.7)
+
+                    # 노출된 해피빈 링크 또는 "클릭하고 기부콩" 버튼 찾기
+                    bean_link = page.get_by_role("link", name=re.compile("네이버 해피빈")).first
+                    if await bean_link.count() == 0:
+                        bean_link = page.get_by_text(re.compile("클릭하고 기부콩")).first
+                    if await bean_link.count() == 0:
+                        clicked.add(item_key)
+                        continue
+
+                    async with page.expect_popup(timeout=8000) as popup_info:
+                        await bean_link.click()
+                    popup = await popup_info.value
+                    await popup.wait_for_load_state("domcontentloaded", timeout=10000)
+                    await asyncio.sleep(1)
+                    await popup.close()
+                    clicked.add(item_key)
+                    collected += 1
+                    new_clicked = True
+                    emit(f"{user_id}: [happybean] 블로그 홈 배너 클릭 완료 ({collected}개)")
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    clicked.add(item_key)
+                    emit(f"{user_id}: [happybean] 블로그 홈 배너 클릭 실패: {e}")
+
+            if not new_clicked:
+                break
+
+            await page.reload(wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(2000)
+
+        ss = await _happybean_screenshot(page, user_id, "blog_home")
+        if collected > 0:
+            return True, f"블로그 홈 콩받기 {collected}개 완료", ss
+        return False, "블로그 홈 콩받기 배너 없음", ss
+    except Exception as e:
+        emit(f"{user_id}: [happybean] 블로그 홈 콩받기 오류: {e}")
+        ss = await _happybean_screenshot(page, user_id, "blog_home")
+        return False, f"블로그 홈 콩받기 오류: {str(e)}", ss
+
+
 async def write_naver_cafe_post(
     page,
     cafe_url: str,
@@ -4075,6 +4148,20 @@ async def run_happybean_for_account(
             ))
             emit(f"{account.user_id}: [happybean] 블로그 {blog_final_msg}")
 
+            await asyncio.sleep(2)
+
+            # 블로그 홈 콩받기
+            emit(f"{account.user_id}: [happybean] 블로그 홈 콩받기 시작")
+            bh_ok, bh_msg, bh_ss = await _collect_blog_home_beans(page, account.user_id, emit)
+            details.append(HappybeanDetailResult(
+                user_id=account.user_id,
+                action="blog_home",
+                status="success" if bh_ok else "error",
+                message=bh_msg,
+                screenshot_path=bh_ss,
+            ))
+            emit(f"{account.user_id}: [happybean] 블로그 홈 {bh_msg}")
+
         finally:
             await context.close()
             await browser.close()
@@ -4125,16 +4212,19 @@ async def run_happybean(config: RunConfig, log: Optional[Callable] = None) -> Ha
             # 전체 성공 여부: 카페/블로그 모두 콩받기 성공한 경우만 "success"
             cafe_details = [d for d in result.details if d.action == "cafe"]
             blog_details = [d for d in result.details if d.action == "blog"]
+            blog_home_details = [d for d in result.details if d.action == "blog_home"]
             all_success = (
                 all(d.status == "success" for d in cafe_details)
                 and all(d.status == "success" for d in blog_details)
             )
             cafe_ok_count = sum(1 for d in cafe_details if d.status == "success")
             blog_ok_count = sum(1 for d in blog_details if d.status == "success")
+            bh_ok_count = sum(1 for d in blog_home_details if d.status == "success")
             result.status = "success" if all_success else "error"
             result.message = (
                 f"카페 콩받기 {cafe_ok_count}/{len(cafe_details)}성공, "
-                f"블로그 콩받기 {blog_ok_count}/{len(blog_details)}성공"
+                f"블로그 콩받기 {blog_ok_count}/{len(blog_details)}성공, "
+                f"블로그홈 콩받기 {bh_ok_count}/{len(blog_home_details)}성공"
             )
             emit(f"[happybean] 전체 완료 - {result.message}")
         except Exception as e:
