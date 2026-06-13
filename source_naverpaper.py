@@ -4067,22 +4067,18 @@ async def run_happybean_for_account(
                 account.user_id,
                 emit,
             )
+            # 카페: bean 스크린샷 우선(콩받기 후 상태), 없으면 글쓰기 스크린샷
+            cafe_final_ss = bean_ss or cafe_ss
+            cafe_final_status = "success" if (cafe_ok and bean_ok) else "error"
+            cafe_final_msg = f"카페 글쓰기 {'성공' if cafe_ok else '실패'} / 콩받기 {'성공' if bean_ok else '실패'}"
             details.append(HappybeanDetailResult(
                 user_id=account.user_id,
                 action="cafe",
-                status="success" if cafe_ok else "error",
-                message=cafe_msg,
-                screenshot_path=cafe_ss,
+                status=cafe_final_status,
+                message=cafe_final_msg,
+                screenshot_path=cafe_final_ss,
             ))
-            emit(f"{account.user_id}: [happybean] 카페 - {'성공' if cafe_ok else '실패'}: {cafe_msg}")
-            details.append(HappybeanDetailResult(
-                user_id=account.user_id,
-                action="bean",
-                status="success" if bean_ok else "info",
-                message=bean_msg,
-                screenshot_path=bean_ss,
-            ))
-            emit(f"{account.user_id}: [happybean] 콩받기 - {bean_msg}")
+            emit(f"{account.user_id}: [happybean] 카페 {cafe_final_msg}")
 
             await asyncio.sleep(2)
 
@@ -4095,22 +4091,18 @@ async def run_happybean_for_account(
                 account.user_id,
                 emit,
             )
+            # 블로그: bean 스크린샷 우선, 없으면 글쓰기 스크린샷
+            blog_final_ss = blog_bean_ss or blog_ss
+            blog_final_status = "success" if (blog_ok and blog_bean_ok) else "error"
+            blog_final_msg = f"블로그 글쓰기 {'성공' if blog_ok else '실패'} / 콩받기 {'성공' if blog_bean_ok else '실패'}"
             details.append(HappybeanDetailResult(
                 user_id=account.user_id,
                 action="blog",
-                status="success" if blog_ok else "error",
-                message=blog_msg,
-                screenshot_path=blog_ss,
+                status=blog_final_status,
+                message=blog_final_msg,
+                screenshot_path=blog_final_ss,
             ))
-            emit(f"{account.user_id}: [happybean] 블로그 - {'성공' if blog_ok else '실패'}: {blog_msg}")
-            details.append(HappybeanDetailResult(
-                user_id=account.user_id,
-                action="blog_bean",
-                status="success" if blog_bean_ok else "info",
-                message=blog_bean_msg,
-                screenshot_path=blog_bean_ss,
-            ))
-            emit(f"{account.user_id}: [happybean] 블로그 콩받기 - {blog_bean_msg}")
+            emit(f"{account.user_id}: [happybean] 블로그 {blog_final_msg}")
 
         finally:
             await context.close()
@@ -4159,8 +4151,21 @@ async def run_happybean(config: RunConfig, log: Optional[Callable] = None) -> Ha
                         message=detail.message,
                         screenshot_path=detail.screenshot_path,
                     ))
-            result.status = "completed"
-            emit("[happybean] 전체 완료")
+            # 전체 성공 여부: 카페/블로그 모두 콩받기 성공한 경우만 "success"
+            cafe_details = [d for d in result.details if d.action == "cafe"]
+            blog_details = [d for d in result.details if d.action == "blog"]
+            all_success = (
+                all(d.status == "success" for d in cafe_details)
+                and all(d.status == "success" for d in blog_details)
+            )
+            cafe_ok_count = sum(1 for d in cafe_details if d.status == "success")
+            blog_ok_count = sum(1 for d in blog_details if d.status == "success")
+            result.status = "success" if all_success else "error"
+            result.message = (
+                f"카페 콩받기 {cafe_ok_count}/{len(cafe_details)}성공, "
+                f"블로그 콩받기 {blog_ok_count}/{len(blog_details)}성공"
+            )
+            emit(f"[happybean] 전체 완료 - {result.message}")
         except Exception as e:
             result.status = "error"
             result.message = str(e)
