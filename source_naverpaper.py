@@ -3742,7 +3742,15 @@ async def write_naver_cafe_post(
         write_url = f"https://cafe.naver.com/ca-fe/cafes/{clubid}/articles/write?boardType=L"
         emit(f"{user_id}: [happybean] 카페 글쓰기 이동 (clubid={clubid})")
         await page.goto(write_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(3000)
+        # 게시판 드롭다운이 나타날 때까지 대기 (페이지 완전 로드 확인)
+        try:
+            await page.wait_for_selector(
+                "div.column_title div.FormSelectButton > button, textarea, input[placeholder*='제목']",
+                timeout=15000,
+            )
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
 
         # 권한 확인 (명확한 오류 페이지만 차단)
         try:
@@ -3795,6 +3803,14 @@ async def write_naver_cafe_post(
             return False, "제목 입력란을 찾지 못했습니다", ss, bean_empty
 
         await asyncio.sleep(0.5)
+
+        # SmartEditor 로딩 완료 대기 (초록 점점점 → contenteditable 나타날 때까지)
+        try:
+            await page.wait_for_selector("[contenteditable='true']", timeout=15000)
+            await asyncio.sleep(1)
+            emit(f"{user_id}: [happybean] SmartEditor 로딩 완료")
+        except Exception as e:
+            emit(f"{user_id}: [happybean] SmartEditor 로딩 대기 실패: {e}")
 
         # 본문 입력 (SmartEditor)
         if not await _happybean_fill_content(page, content, user_id, emit):
