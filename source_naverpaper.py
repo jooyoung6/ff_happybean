@@ -3886,19 +3886,54 @@ async def write_naver_blog_post(
             return False, "로그인이 필요합니다", ss, bean_empty
 
         # 도움말 패널 닫기 (자동으로 열리면 클릭 방해)
-        try:
-            for close_sel in [
-                "button[aria-label='닫기']",
-                ".help_close",
-                "button.se-help-panel-close",
-                ".se-help-panel button",
-            ]:
+        help_closed = False
+        for close_sel in [
+            "button[aria-label='닫기']",
+            "button[aria-label='Close']",
+            ".help_close",
+            "button.se-help-panel-close",
+            ".se-help-panel button",
+            "button.se-help-panel__close",
+            "[class*='help'] button",
+            "[class*='Help'] button",
+        ]:
+            try:
                 btn = page.locator(close_sel).first
                 if await btn.count() > 0:
                     await btn.click()
                     await asyncio.sleep(0.5)
-                    emit(f"{user_id}: [happybean] 도움말 패널 닫기")
+                    emit(f"{user_id}: [happybean] 도움말 닫기 ({close_sel})")
+                    help_closed = True
                     break
+            except Exception:
+                pass
+
+        if not help_closed:
+            # JS로 도움말 관련 버튼 직접 탐색 후 클릭
+            try:
+                closed = await page.evaluate("""() => {
+                    const sels = [
+                        '[class*="help"] button',
+                        '[class*="Help"] button',
+                        '[class*="panel"] button[class*="close"]',
+                        '[class*="panel"] button[class*="Close"]',
+                    ];
+                    for (const s of sels) {
+                        const btn = document.querySelector(s);
+                        if (btn) { btn.click(); return s; }
+                    }
+                    return null;
+                }""")
+                if closed:
+                    emit(f"{user_id}: [happybean] 도움말 JS 닫기: {closed}")
+                    await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+        # Escape 키로도 시도
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
         except Exception:
             pass
 
