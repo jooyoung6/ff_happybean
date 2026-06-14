@@ -3471,12 +3471,12 @@ def _fmt(value):
 # ===== HAPPYBEAN (해피빈 콩받기) =====
 
 async def _happybean_screenshot(page, user_id: str, action: str) -> str:
-    """현재 페이지 스크린샷을 /data/tmp/ 에 저장하고 경로 반환."""
+    """현재 페이지 스크린샷을 플러그인 data/screenshots/ 에 저장하고 경로 반환."""
     try:
         import time as _time
-        ss_dir = "/data/tmp"
+        ss_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "screenshots")
         os.makedirs(ss_dir, exist_ok=True)
-        ss_path = f"{ss_dir}/happybean_{action}_{user_id}_{int(_time.time())}.png"
+        ss_path = os.path.join(ss_dir, f"happybean_{action}_{user_id}_{int(_time.time())}.png")
         await page.screenshot(path=ss_path, full_page=False)
         return ss_path
     except Exception:
@@ -3688,19 +3688,52 @@ async def _happybean_submit(page, user_id: str, emit: Callable, is_blog: bool = 
 
 
 async def _check_happybean_banner(page, user_id: str, emit: Callable) -> tuple[bool, str, str]:
-    """콩받기 배너 확인 및 클릭. (성공여부, 메시지, 스크린샷경로) 반환."""
+    """카페/블로그 글 작성 후 콩받기 배너 클릭. 호버 → 버튼 노출 → 팝업 클릭."""
     try:
-        banner = page.locator("#floatingda_content div:nth-of-type(6)")
-        await banner.wait_for(state="visible", timeout=5000)
-        await banner.click()
+        # 마우스를 페이지 중앙으로 이동하여 플로팅 배너 활성화
+        await page.mouse.move(640, 450)
         await asyncio.sleep(1)
-        emit(f"{user_id}: [happybean] 콩받기 배너 클릭 완료")
-        ss = await _happybean_screenshot(page, user_id, "bean")
-        return True, "콩받기 완료", ss
-    except Exception:
+
+        # #floatingda_content 컨테이너 대기 (최대 8초)
+        try:
+            await page.locator("#floatingda_content").wait_for(state="visible", timeout=8000)
+        except Exception:
+            pass
+
+        items = page.locator("#floatingda_content > *")
+        count = await items.count()
+        emit(f"{user_id}: [happybean] 플로팅 배너 {count}개 발견")
+
+        for i in range(count):
+            try:
+                await items.nth(i).hover()
+                await asyncio.sleep(1)
+
+                bean_btn = page.get_by_text(re.compile("클릭하고 기부콩"))
+                if await bean_btn.count() == 0:
+                    bean_btn = page.get_by_role("link", name=re.compile("네이버 해피빈"))
+                if await bean_btn.count() == 0:
+                    continue
+
+                async with page.expect_popup(timeout=8000) as popup_info:
+                    await bean_btn.first.click()
+                popup = await popup_info.value
+                await popup.wait_for_load_state("domcontentloaded", timeout=10000)
+                await asyncio.sleep(1)
+                await popup.close()
+                emit(f"{user_id}: [happybean] 콩받기 배너 클릭 완료")
+                ss = await _happybean_screenshot(page, user_id, "bean")
+                return True, "콩받기 완료", ss
+            except Exception as e:
+                emit(f"{user_id}: [happybean] 배너 {i} 클릭 실패: {e}")
+
         emit(f"{user_id}: [happybean] 콩받기 배너 안 떴음")
         ss = await _happybean_screenshot(page, user_id, "bean")
         return False, "콩받기 배너 안떴다", ss
+    except Exception as e:
+        emit(f"{user_id}: [happybean] 콩받기 배너 오류: {e}")
+        ss = await _happybean_screenshot(page, user_id, "bean")
+        return False, f"콩받기 오류: {str(e)}", ss
 
 
 async def _collect_blog_home_beans(page, user_id: str, emit: Callable) -> tuple[bool, str, str]:
@@ -3712,6 +3745,10 @@ async def _collect_blog_home_beans(page, user_id: str, emit: Callable) -> tuple[
         emit(f"{user_id}: [happybean] 블로그 홈 콩받기 시작")
         await page.goto(BLOG_HOME_URL, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(2000)
+
+        # 마우스를 페이지 중앙으로 이동하여 플로팅 배너 활성화
+        await page.mouse.move(640, 450)
+        await asyncio.sleep(1)
 
         clicked = set()
         collected = 0
