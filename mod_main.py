@@ -127,6 +127,8 @@ class ModuleMain(PluginModuleBase):
             arg["proxy_reward_enabled"] = arg.get("proxy_enabled", "False")
         arg["scheduler_active"] = F.scheduler.is_include(self._job_id())
         arg["is_running"] = F.scheduler.is_running(self._job_id())
+        arg["happybean_scheduler_active"] = F.scheduler.is_include(self._happybean_job_id())
+        arg["happybean_is_running"] = F.scheduler.is_running(self._happybean_job_id())
         arg["db_path"] = self._db_path()
         arg["cookie_dir"] = self._cookie_dir()
         arg["package_name"] = P.package_name
