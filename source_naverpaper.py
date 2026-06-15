@@ -4008,32 +4008,58 @@ async def write_naver_blog_post(
         except Exception:
             emit(f"{user_id}: [happybean] 도움말 패널 없음 (스킵)")
 
-        # 제목 입력: iframe 안의 span.se-placeholder (제목) 클릭 후 키보드 입력
+        # 에디터(SmartEditor) 초기화 대기
+        try:
+            await mf.locator("[contenteditable='true']").first.wait_for(state="visible", timeout=15000)
+            emit(f"{user_id}: [happybean] 블로그 에디터 초기화 완료")
+        except Exception as e:
+            emit(f"{user_id}: [happybean] 블로그 에디터 초기화 대기 실패: {e}")
+
+        # 제목 입력
         title_filled = False
         for attempt in range(5):
+            # 1순위: se-title-input (SmartEditor3 제목 div)
+            try:
+                title_input = mf.locator("div.se-title-input").first
+                cnt = await title_input.count()
+                emit(f"{user_id}: [happybean] 제목 se-title-input count={cnt} (attempt {attempt+1})")
+                if cnt > 0:
+                    await title_input.click()
+                    await asyncio.sleep(0.3)
+                    await page.keyboard.type(title, delay=30)
+                    title_filled = True
+                    emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (se-title-input)")
+                    break
+            except Exception as e:
+                emit(f"{user_id}: [happybean] 제목 se-title-input 실패 attempt{attempt+1}: {e}")
+            # 2순위: placeholder span
             try:
                 title_ph = mf.locator("span.se-placeholder").filter(has_text="제목").first
-                if await title_ph.count() > 0:
+                cnt = await title_ph.count()
+                emit(f"{user_id}: [happybean] 제목 placeholder count={cnt} (attempt {attempt+1})")
+                if cnt > 0:
                     await title_ph.click()
                     await asyncio.sleep(0.3)
                     await page.keyboard.type(title, delay=30)
                     title_filled = True
-                    emit(f"{user_id}: [happybean] 블로그 제목 입력 완료")
+                    emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (placeholder)")
                     break
-            except Exception:
-                pass
-            # 폴백: iframe 안의 첫 번째 contenteditable
+            except Exception as e:
+                emit(f"{user_id}: [happybean] 제목 placeholder 실패 attempt{attempt+1}: {e}")
+            # 3순위: 첫 번째 contenteditable
             try:
                 first_ce = mf.locator("[contenteditable='true']").first
-                if await first_ce.count() > 0:
+                cnt = await first_ce.count()
+                emit(f"{user_id}: [happybean] 제목 contenteditable count={cnt} (attempt {attempt+1})")
+                if cnt > 0:
                     await first_ce.click()
                     await asyncio.sleep(0.3)
                     await page.keyboard.type(title, delay=30)
                     title_filled = True
-                    emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (fallback)")
+                    emit(f"{user_id}: [happybean] 블로그 제목 입력 완료 (contenteditable)")
                     break
             except Exception as e:
-                emit(f"{user_id}: [happybean] 제목 실패 attempt{attempt+1}: {e}")
+                emit(f"{user_id}: [happybean] 제목 contenteditable 실패 attempt{attempt+1}: {e}")
             await asyncio.sleep(2)
 
         if not title_filled:
