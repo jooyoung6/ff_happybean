@@ -3757,6 +3757,7 @@ async def _collect_blog_home_beans(page, user_id: str, emit: Callable) -> tuple[
             # #floatingda_content 안의 플로팅 배너 아이콘들
             floating_items = page.locator("#floatingda_content > *")
             count = await floating_items.count()
+            emit(f"{user_id}: [happybean] 블로그 홈 플로팅 배너 {count}개 발견")
 
             new_clicked = False
             for i in range(count):
@@ -3766,35 +3767,59 @@ async def _collect_blog_home_beans(page, user_id: str, emit: Callable) -> tuple[
                 except Exception:
                     item_key = str(i)
                 if item_key in clicked:
+                    emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 이미 처리됨 (스킵)")
                     continue
 
                 try:
                     # 호버하여 콩받기 버튼 노출
+                    emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 호버 시작")
                     await item.hover()
                     await asyncio.sleep(0.7)
 
-                    # 노출된 해피빈 링크 또는 "클릭하고 기부콩" 버튼 찾기
-                    bean_link = page.get_by_role("link", name=re.compile("네이버 해피빈")).first
-                    if await bean_link.count() == 0:
-                        bean_link = page.get_by_text(re.compile("클릭하고 기부콩")).first
-                    if await bean_link.count() == 0:
+                    # 노출된 해피빈 링크 또는 "클릭하고 기부콩" 버튼 찾기 (다양한 셀렉터 시도)
+                    bean_link = None
+                    for sel_label, locator in [
+                        ("link:네이버 해피빈", page.get_by_role("link", name=re.compile("네이버 해피빈")).first),
+                        ("text:클릭하고 기부콩", page.get_by_text(re.compile("클릭하고 기부콩"), exact=False).first),
+                        ("text:기부콩", page.get_by_text(re.compile("기부콩"), exact=False).first),
+                        ("btn:기부콩", page.locator("button,a").filter(has_text=re.compile("기부콩")).first),
+                        ("btn:콩 받기", page.locator("button,a").filter(has_text=re.compile("콩.{0,3}받기")).first),
+                    ]:
+                        cnt = await locator.count()
+                        emit(f"{user_id}: [happybean] 블로그 홈 버튼 탐색 [{sel_label}] count={cnt}")
+                        if cnt > 0:
+                            bean_link = locator
+                            emit(f"{user_id}: [happybean] 블로그 홈 버튼 발견 [{sel_label}]")
+                            break
+
+                    if bean_link is None:
+                        emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 콩받기 버튼 없음")
                         clicked.add(item_key)
                         continue
 
-                    async with page.expect_popup(timeout=8000) as popup_info:
-                        await bean_link.click()
-                    popup = await popup_info.value
-                    await popup.wait_for_load_state("domcontentloaded", timeout=10000)
-                    await asyncio.sleep(1)
-                    await popup.close()
+                    # 팝업 열리는 경우와 아닌 경우 모두 처리
+                    try:
+                        async with page.expect_popup(timeout=5000) as popup_info:
+                            await bean_link.click()
+                        popup = await popup_info.value
+                        await popup.wait_for_load_state("domcontentloaded", timeout=10000)
+                        await asyncio.sleep(1)
+                        await popup.close()
+                        emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 팝업 클릭 완료")
+                    except Exception:
+                        # 팝업 없이 바로 처리되는 경우
+                        await bean_link.click(force=True)
+                        await asyncio.sleep(1)
+                        emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 직접 클릭 완료")
+
                     clicked.add(item_key)
                     collected += 1
                     new_clicked = True
-                    emit(f"{user_id}: [happybean] 블로그 홈 배너 클릭 완료 ({collected}개)")
+                    emit(f"{user_id}: [happybean] 블로그 홈 배너 클릭 완료 ({collected}개 누적)")
                     await asyncio.sleep(1)
                 except Exception as e:
                     clicked.add(item_key)
-                    emit(f"{user_id}: [happybean] 블로그 홈 배너 클릭 실패: {e}")
+                    emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 클릭 실패: {e}")
 
             if not new_clicked:
                 break
