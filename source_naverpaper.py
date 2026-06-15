@@ -3973,6 +3973,56 @@ async def write_naver_cafe_post(
         return False, f"오류: {e}", "", bean_empty
 
 
+async def _close_blog_help_panel(page, mf, user_id: str, emit: Callable) -> bool:
+    """블로그 에디터 도움말 패널 닫기. 여러 셀렉터를 순서대로 시도."""
+    selector_labels = [
+        ("role:닫기", mf.get_by_role("button", name="닫기")),
+        ("class:help/close", mf.locator("button[class*='help'] , button[class*='close'] , button[class*='Close']").first),
+        ("h1.se-help-title~button", mf.locator("h1.se-help-title + button , h1.se-help-title ~ button").first),
+        ("container__HW button", mf.locator("[class*='container__HW'] button").first),
+    ]
+    for label, btn in selector_labels:
+        try:
+            cnt = await btn.count()
+            emit(f"{user_id}: [happybean] 도움말 닫기 시도 [{label}] count={cnt}")
+            if cnt == 0:
+                continue
+            await btn.wait_for(state="visible", timeout=2000)
+            await btn.click()
+            await asyncio.sleep(0.5)
+            emit(f"{user_id}: [happybean] 도움말 패널 닫기 완료 [{label}]")
+            return True
+        except Exception as e:
+            emit(f"{user_id}: [happybean] 도움말 닫기 실패 [{label}]: {e}")
+    # JS 강제 닫기: se-help-title 포함하는 컨테이너 숨기기
+    try:
+        frame = page.frame("mainFrame")
+        if frame:
+            found = await frame.evaluate("""
+                const h = document.querySelector('h1.se-help-title');
+                if (!h) return 'not_found';
+                let node = h;
+                for (let i = 0; i < 5; i++) {
+                    node = node.parentElement;
+                    if (!node) break;
+                    const style = window.getComputedStyle(node);
+                    if (style.position === 'fixed' || style.position === 'absolute' || node.offsetWidth > 200) {
+                        node.style.display = 'none';
+                        return 'hidden:' + (node.className || node.tagName);
+                    }
+                }
+                return 'no_container';
+            """)
+            emit(f"{user_id}: [happybean] 도움말 패널 JS 강제 닫기 결과: {found}")
+            await asyncio.sleep(0.3)
+            if found and found != "not_found":
+                return True
+    except Exception as e:
+        emit(f"{user_id}: [happybean] 도움말 JS 닫기 오류: {e}")
+    emit(f"{user_id}: [happybean] 도움말 패널 없음 (스킵)")
+    return False
+
+
 async def write_naver_blog_post(
     page,
     title: str,
@@ -3998,15 +4048,8 @@ async def write_naver_blog_post(
         # 블로그 에디터 전체가 iframe[name="mainFrame"] 안에 있음
         mf = page.frame_locator('iframe[name="mainFrame"]')
 
-        # 도움말 패널 닫기 (처음 실행 시만 표시됨)
-        try:
-            close_btn = mf.get_by_role("button", name="닫기")
-            await close_btn.wait_for(state="visible", timeout=5000)
-            await close_btn.click()
-            await asyncio.sleep(0.5)
-            emit(f"{user_id}: [happybean] 도움말 패널 닫기 완료")
-        except Exception:
-            emit(f"{user_id}: [happybean] 도움말 패널 없음 (스킵)")
+        # 도움말 패널 닫기
+        await _close_blog_help_panel(page, mf, user_id, emit)
 
         # 에디터(SmartEditor) 초기화 대기
         try:
@@ -4086,6 +4129,9 @@ async def write_naver_blog_post(
                 ss = await _happybean_screenshot(page, user_id, "blog")
                 return False, "블로그 본문 에디터를 찾지 못했습니다", ss, bean_empty
         await asyncio.sleep(1)
+
+        # 발행 버튼 클릭 전 도움말 패널 재확인 및 닫기
+        await _close_blog_help_panel(page, mf, user_id, emit)
 
         # 발행 버튼 (iframe 안)
         submitted = False
