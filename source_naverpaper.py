@@ -293,6 +293,15 @@ def _run_coro_blocking(coro):
     loop = asyncio.new_event_loop()
     try:
         asyncio.set_event_loop(loop)
+        # Python 3.10 Linux: SafeChildWatcher는 메인스레드에서만 작동.
+        # 스케줄러 등 비메인스레드에서 Playwright subprocess 실행 시 ThreadedChildWatcher 필요.
+        if sys.platform != "win32" and threading.current_thread() is not threading.main_thread():
+            try:
+                watcher = asyncio.ThreadedChildWatcher()
+                watcher.attach_loop(loop)
+                asyncio.set_child_watcher(watcher)
+            except Exception:
+                pass
         try:
             asyncio.events._set_running_loop(None)
         except Exception:
@@ -4176,14 +4185,25 @@ async def write_naver_blog_post(
 
         await page.wait_for_timeout(2000)
 
-        # 발행 확인 다이얼로그 (iframe 안)
+        # 발행 확인 다이얼로그 (페이지 오버레이 또는 iframe 안)
         try:
-            dlg_btn = mf.locator("div.layer_btn_area__UzyKH i").first
-            if await dlg_btn.count() > 0:
-                await dlg_btn.click()
-                emit(f"{user_id}: [happybean] 발행 확인 다이얼로그 클릭")
+            # 1순위: 페이지 전체에서 seOnePublishBtn (발행 확인 팝업)
+            confirm_btn = page.locator("button[data-testid='seOnePublishBtn']")
+            cnt = await confirm_btn.count()
+            emit(f"{user_id}: [happybean] 발행 확인 버튼 count={cnt}")
+            if cnt > 0:
+                await confirm_btn.first.wait_for(state="visible", timeout=3000)
+                await confirm_btn.first.click()
+                emit(f"{user_id}: [happybean] 발행 확인 버튼 클릭 (seOnePublishBtn)")
+            else:
+                # 2순위: iframe 안에서 동일 셀렉터
+                dlg_btn = mf.locator("button[data-testid='seOnePublishBtn']")
+                cnt2 = await dlg_btn.count()
+                if cnt2 > 0:
+                    await dlg_btn.first.click()
+                    emit(f"{user_id}: [happybean] 발행 확인 버튼 클릭 (iframe seOnePublishBtn)")
         except Exception as e:
-            emit(f"{user_id}: [happybean] 다이얼로그 스킵: {e}")
+            emit(f"{user_id}: [happybean] 발행 확인 다이얼로그 스킵: {e}")
 
         await page.wait_for_timeout(3000)
 
