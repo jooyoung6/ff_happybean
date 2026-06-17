@@ -3487,7 +3487,7 @@ async def _happybean_screenshot(page, user_id: str, action: str) -> str:
         ss_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "screenshots")
         os.makedirs(ss_dir, exist_ok=True)
         ss_path = os.path.join(ss_dir, f"happybean_{action}_{user_id}_{int(_time.time())}.png")
-        await page.screenshot(path=ss_path, full_page=False)
+        await page.screenshot(path=ss_path, full_page=True)
         return ss_path
     except Exception:
         return ""
@@ -4249,7 +4249,7 @@ async def run_happybean_for_account(
         context = await browser.new_context(
             user_agent=DESKTOP_UA,
             locale="ko-KR",
-            viewport={"width": 1280, "height": 900},
+            viewport={"width": 1920, "height": 1080},
             storage_state=storage_state,
         )
         page = await context.new_page()

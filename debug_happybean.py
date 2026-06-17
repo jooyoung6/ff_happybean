@@ -69,7 +69,7 @@ async def main():
         )
         ctx_args = dict(
             locale="ko-KR",
-            viewport={"width": 1280, "height": 900},
+            viewport={"width": 1920, "height": 1080},
         )
         if storage_state:
             ctx_args["storage_state"] = storage_state
