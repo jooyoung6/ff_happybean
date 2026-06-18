@@ -180,8 +180,14 @@ class Database:
     def __init__(self, db_path: str):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.db_path = db_path
-        self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+        self.engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False, "timeout": 30},
+        )
         self.Session = sessionmaker(bind=self.engine)
+        with self.engine.begin() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.execute(text("PRAGMA busy_timeout=30000"))
 
     def create_all(self):
         Base.metadata.create_all(bind=self.engine)
@@ -3737,6 +3743,44 @@ async def _check_happybean_banner(page, user_id: str, emit: Callable) -> tuple[b
             except Exception as e:
                 emit(f"{user_id}: [happybean] 배너 {i} 클릭 실패: {e}")
 
+        # #floatingda_content 밖(예: 화면 우상단 등)에 배너가 뜨는 경우 페이지 전체에서 재탐색
+        for sel_label, locator in [
+            ("link:네이버 해피빈", page.get_by_role("link", name=re.compile("네이버 해피빈")).first),
+            ("text:클릭하고 기부콩", page.get_by_text(re.compile("클릭하고 기부콩"), exact=False).first),
+            ("text:기부콩", page.get_by_text(re.compile("기부콩"), exact=False).first),
+            ("btn:콩 받기", page.locator("button,a").filter(has_text=re.compile("콩.{0,3}받기")).first),
+        ]:
+            try:
+                cnt = await locator.count()
+                emit(f"{user_id}: [happybean] 전체 탐색 [{sel_label}] count={cnt}")
+                if cnt == 0:
+                    continue
+                await locator.scroll_into_view_if_needed(timeout=3000)
+                box = await locator.bounding_box()
+                if box:
+                    await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                    await asyncio.sleep(1)
+                await locator.hover()
+                await asyncio.sleep(0.5)
+
+                bean_btn = page.get_by_text(re.compile("클릭하고 기부콩"))
+                if await bean_btn.count() == 0:
+                    bean_btn = page.get_by_role("link", name=re.compile("네이버 해피빈"))
+                if await bean_btn.count() == 0:
+                    bean_btn = locator
+
+                async with page.expect_popup(timeout=8000) as popup_info:
+                    await bean_btn.first.click()
+                popup = await popup_info.value
+                await popup.wait_for_load_state("domcontentloaded", timeout=10000)
+                await asyncio.sleep(1)
+                await popup.close()
+                emit(f"{user_id}: [happybean] 콩받기 배너 클릭 완료 (전체 탐색 [{sel_label}])")
+                ss = await _happybean_screenshot(page, user_id, "bean")
+                return True, "콩받기 완료", ss
+            except Exception as e:
+                emit(f"{user_id}: [happybean] 전체 탐색 [{sel_label}] 클릭 실패: {e}")
+
         emit(f"{user_id}: [happybean] 콩받기 배너 안 떴음")
         ss = await _happybean_screenshot(page, user_id, "bean")
         return False, "콩받기 배너 안떴다", ss
@@ -4305,8 +4349,9 @@ async def run_happybean_for_account(
 
             await asyncio.sleep(2)
 
-            # 블로그 홈 콩받기
+            # 블로그 홈 콩받기 (배너 위치가 1280x900 기준으로 맞춰져 있어 뷰포트를 되돌림)
             emit(f"{account.user_id}: [happybean] 블로그 홈 콩받기 시작")
+            await page.set_viewport_size({"width": 1280, "height": 900})
             bh_ok, bh_msg, bh_ss = await _collect_blog_home_beans(page, account.user_id, emit)
             details.append(HappybeanDetailResult(
                 user_id=account.user_id,
