@@ -3486,6 +3486,10 @@ def _fmt(value):
 
 # ===== HAPPYBEAN (해피빈 콩받기) =====
 
+# 배너 문구 중 "당일 수확 배송으로..." 같은 프로모션 텍스트는 매일 바뀌므로,
+# 고정된 "기부콩 N개 받기" 부분만 매칭한다.
+_BEAN_BTN_RE = re.compile(r"기부콩\s*\d*\s*개?\s*받기")
+
 async def _happybean_screenshot(page, user_id: str, action: str) -> str:
     """현재 페이지 스크린샷을 플러그인 data/screenshots/ 에 저장하고 경로 반환."""
     try:
@@ -3720,7 +3724,7 @@ async def _try_click_happybean_banner(page, user_id: str, emit: Callable) -> boo
             await items.nth(i).hover()
             await asyncio.sleep(1)
 
-            bean_btn = page.get_by_text(re.compile("클릭하고 기부콩"))
+            bean_btn = page.get_by_text(_BEAN_BTN_RE)
             if await bean_btn.count() == 0:
                 bean_btn = page.get_by_role("link", name=re.compile("네이버 해피빈"))
             if await bean_btn.count() == 0:
@@ -3739,9 +3743,8 @@ async def _try_click_happybean_banner(page, user_id: str, emit: Callable) -> boo
 
     # #floatingda_content 밖(예: 화면 우상단 등)에 배너가 뜨는 경우 페이지 전체에서 재탐색
     for sel_label, locator in [
+        ("text:기부콩 N개 받기", page.get_by_text(_BEAN_BTN_RE).first),
         ("link:네이버 해피빈", page.get_by_role("link", name=re.compile("네이버 해피빈")).first),
-        ("text:클릭하고 기부콩", page.get_by_text(re.compile("클릭하고 기부콩"), exact=False).first),
-        ("text:기부콩", page.get_by_text(re.compile("기부콩"), exact=False).first),
         ("btn:콩 받기", page.locator("button,a").filter(has_text=re.compile("콩.{0,3}받기")).first),
     ]:
         try:
@@ -3757,7 +3760,7 @@ async def _try_click_happybean_banner(page, user_id: str, emit: Callable) -> boo
             await locator.hover()
             await asyncio.sleep(0.5)
 
-            bean_btn = page.get_by_text(re.compile("클릭하고 기부콩"))
+            bean_btn = page.get_by_text(_BEAN_BTN_RE)
             if await bean_btn.count() == 0:
                 bean_btn = page.get_by_role("link", name=re.compile("네이버 해피빈"))
             if await bean_btn.count() == 0:
@@ -3773,6 +3776,36 @@ async def _try_click_happybean_banner(page, user_id: str, emit: Callable) -> boo
             return True
         except Exception as e:
             emit(f"{user_id}: [happybean] 전체 탐색 [{sel_label}] 클릭 실패: {e}")
+
+    # 블로그 글쓰기 에디터처럼 iframe[name="mainFrame"] 안에 배너가 뜨는 경우 (예: 발행 후 가운데 배너)
+    try:
+        mf = page.frame_locator('iframe[name="mainFrame"]')
+        for sel_label, locator in [
+            ("frame text:기부콩 N개 받기", mf.get_by_text(_BEAN_BTN_RE).first),
+            ("frame link:네이버 해피빈", mf.get_by_role("link", name=re.compile("네이버 해피빈")).first),
+        ]:
+            try:
+                cnt = await locator.count()
+                emit(f"{user_id}: [happybean] iframe 탐색 [{sel_label}] count={cnt}")
+                if cnt == 0:
+                    continue
+                await locator.scroll_into_view_if_needed(timeout=3000)
+                try:
+                    async with page.expect_popup(timeout=5000) as popup_info:
+                        await locator.click()
+                    popup = await popup_info.value
+                    await popup.wait_for_load_state("domcontentloaded", timeout=10000)
+                    await asyncio.sleep(1)
+                    await popup.close()
+                except Exception:
+                    await locator.click(force=True)
+                    await asyncio.sleep(1)
+                emit(f"{user_id}: [happybean] 콩받기 배너 클릭 완료 (iframe [{sel_label}])")
+                return True
+            except Exception as e:
+                emit(f"{user_id}: [happybean] iframe 탐색 [{sel_label}] 클릭 실패: {e}")
+    except Exception:
+        pass
 
     return False
 
@@ -3839,10 +3872,8 @@ async def _blog_home_click_round(page, user_id: str, emit: Callable, clicked: se
             # 노출된 해피빈 링크 또는 "클릭하고 기부콩" 버튼 찾기 (다양한 셀렉터 시도)
             bean_link = None
             for sel_label, locator in [
+                ("text:기부콩 N개 받기", page.get_by_text(_BEAN_BTN_RE).first),
                 ("link:네이버 해피빈", page.get_by_role("link", name=re.compile("네이버 해피빈")).first),
-                ("text:클릭하고 기부콩", page.get_by_text(re.compile("클릭하고 기부콩"), exact=False).first),
-                ("text:기부콩", page.get_by_text(re.compile("기부콩"), exact=False).first),
-                ("btn:기부콩", page.locator("button,a").filter(has_text=re.compile("기부콩")).first),
                 ("btn:콩 받기", page.locator("button,a").filter(has_text=re.compile("콩.{0,3}받기")).first),
             ]:
                 cnt = await locator.count()
