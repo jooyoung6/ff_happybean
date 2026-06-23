@@ -3703,83 +3703,100 @@ async def _happybean_submit(page, user_id: str, emit: Callable, is_blog: bool = 
     return False
 
 
+async def _try_click_happybean_banner(page, user_id: str, emit: Callable) -> bool:
+    """현재 페이지 상태에서 콩받기 배너를 1회 탐색하여 클릭. 성공 시 True."""
+    # #floatingda_content 컨테이너 대기 (최대 8초)
+    try:
+        await page.locator("#floatingda_content").wait_for(state="visible", timeout=8000)
+    except Exception:
+        pass
+
+    items = page.locator("#floatingda_content > *")
+    count = await items.count()
+    emit(f"{user_id}: [happybean] 플로팅 배너 {count}개 발견")
+
+    for i in range(count):
+        try:
+            await items.nth(i).hover()
+            await asyncio.sleep(1)
+
+            bean_btn = page.get_by_text(re.compile("클릭하고 기부콩"))
+            if await bean_btn.count() == 0:
+                bean_btn = page.get_by_role("link", name=re.compile("네이버 해피빈"))
+            if await bean_btn.count() == 0:
+                continue
+
+            async with page.expect_popup(timeout=8000) as popup_info:
+                await bean_btn.first.click()
+            popup = await popup_info.value
+            await popup.wait_for_load_state("domcontentloaded", timeout=10000)
+            await asyncio.sleep(1)
+            await popup.close()
+            emit(f"{user_id}: [happybean] 콩받기 배너 클릭 완료")
+            return True
+        except Exception as e:
+            emit(f"{user_id}: [happybean] 배너 {i} 클릭 실패: {e}")
+
+    # #floatingda_content 밖(예: 화면 우상단 등)에 배너가 뜨는 경우 페이지 전체에서 재탐색
+    for sel_label, locator in [
+        ("link:네이버 해피빈", page.get_by_role("link", name=re.compile("네이버 해피빈")).first),
+        ("text:클릭하고 기부콩", page.get_by_text(re.compile("클릭하고 기부콩"), exact=False).first),
+        ("text:기부콩", page.get_by_text(re.compile("기부콩"), exact=False).first),
+        ("btn:콩 받기", page.locator("button,a").filter(has_text=re.compile("콩.{0,3}받기")).first),
+    ]:
+        try:
+            cnt = await locator.count()
+            emit(f"{user_id}: [happybean] 전체 탐색 [{sel_label}] count={cnt}")
+            if cnt == 0:
+                continue
+            await locator.scroll_into_view_if_needed(timeout=3000)
+            box = await locator.bounding_box()
+            if box:
+                await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                await asyncio.sleep(1)
+            await locator.hover()
+            await asyncio.sleep(0.5)
+
+            bean_btn = page.get_by_text(re.compile("클릭하고 기부콩"))
+            if await bean_btn.count() == 0:
+                bean_btn = page.get_by_role("link", name=re.compile("네이버 해피빈"))
+            if await bean_btn.count() == 0:
+                bean_btn = locator
+
+            async with page.expect_popup(timeout=8000) as popup_info:
+                await bean_btn.first.click()
+            popup = await popup_info.value
+            await popup.wait_for_load_state("domcontentloaded", timeout=10000)
+            await asyncio.sleep(1)
+            await popup.close()
+            emit(f"{user_id}: [happybean] 콩받기 배너 클릭 완료 (전체 탐색 [{sel_label}])")
+            return True
+        except Exception as e:
+            emit(f"{user_id}: [happybean] 전체 탐색 [{sel_label}] 클릭 실패: {e}")
+
+    return False
+
+
 async def _check_happybean_banner(page, user_id: str, emit: Callable) -> tuple[bool, str, str]:
-    """카페/블로그 글 작성 후 콩받기 배너 클릭. 호버 → 버튼 노출 → 팝업 클릭."""
+    """카페/블로그 글 작성 후 콩받기 배너 클릭. 호버 → 버튼 노출 → 팝업 클릭.
+    배너가 늦게 뜨는 경우를 대비해 마지막에 한 번 더 재시도한다."""
     try:
         # 마우스를 페이지 중앙으로 이동하여 플로팅 배너 활성화
         await page.mouse.move(640, 450)
         await asyncio.sleep(1)
 
-        # #floatingda_content 컨테이너 대기 (최대 8초)
-        try:
-            await page.locator("#floatingda_content").wait_for(state="visible", timeout=8000)
-        except Exception:
-            pass
+        if await _try_click_happybean_banner(page, user_id, emit):
+            ss = await _happybean_screenshot(page, user_id, "bean")
+            return True, "콩받기 완료", ss
 
-        items = page.locator("#floatingda_content > *")
-        count = await items.count()
-        emit(f"{user_id}: [happybean] 플로팅 배너 {count}개 발견")
-
-        for i in range(count):
-            try:
-                await items.nth(i).hover()
-                await asyncio.sleep(1)
-
-                bean_btn = page.get_by_text(re.compile("클릭하고 기부콩"))
-                if await bean_btn.count() == 0:
-                    bean_btn = page.get_by_role("link", name=re.compile("네이버 해피빈"))
-                if await bean_btn.count() == 0:
-                    continue
-
-                async with page.expect_popup(timeout=8000) as popup_info:
-                    await bean_btn.first.click()
-                popup = await popup_info.value
-                await popup.wait_for_load_state("domcontentloaded", timeout=10000)
-                await asyncio.sleep(1)
-                await popup.close()
-                emit(f"{user_id}: [happybean] 콩받기 배너 클릭 완료")
-                ss = await _happybean_screenshot(page, user_id, "bean")
-                return True, "콩받기 완료", ss
-            except Exception as e:
-                emit(f"{user_id}: [happybean] 배너 {i} 클릭 실패: {e}")
-
-        # #floatingda_content 밖(예: 화면 우상단 등)에 배너가 뜨는 경우 페이지 전체에서 재탐색
-        for sel_label, locator in [
-            ("link:네이버 해피빈", page.get_by_role("link", name=re.compile("네이버 해피빈")).first),
-            ("text:클릭하고 기부콩", page.get_by_text(re.compile("클릭하고 기부콩"), exact=False).first),
-            ("text:기부콩", page.get_by_text(re.compile("기부콩"), exact=False).first),
-            ("btn:콩 받기", page.locator("button,a").filter(has_text=re.compile("콩.{0,3}받기")).first),
-        ]:
-            try:
-                cnt = await locator.count()
-                emit(f"{user_id}: [happybean] 전체 탐색 [{sel_label}] count={cnt}")
-                if cnt == 0:
-                    continue
-                await locator.scroll_into_view_if_needed(timeout=3000)
-                box = await locator.bounding_box()
-                if box:
-                    await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                    await asyncio.sleep(1)
-                await locator.hover()
-                await asyncio.sleep(0.5)
-
-                bean_btn = page.get_by_text(re.compile("클릭하고 기부콩"))
-                if await bean_btn.count() == 0:
-                    bean_btn = page.get_by_role("link", name=re.compile("네이버 해피빈"))
-                if await bean_btn.count() == 0:
-                    bean_btn = locator
-
-                async with page.expect_popup(timeout=8000) as popup_info:
-                    await bean_btn.first.click()
-                popup = await popup_info.value
-                await popup.wait_for_load_state("domcontentloaded", timeout=10000)
-                await asyncio.sleep(1)
-                await popup.close()
-                emit(f"{user_id}: [happybean] 콩받기 배너 클릭 완료 (전체 탐색 [{sel_label}])")
-                ss = await _happybean_screenshot(page, user_id, "bean")
-                return True, "콩받기 완료", ss
-            except Exception as e:
-                emit(f"{user_id}: [happybean] 전체 탐색 [{sel_label}] 클릭 실패: {e}")
+        # 배너가 늦게 뜨는 경우를 위해 마지막에 한 번 더 시도
+        emit(f"{user_id}: [happybean] 콩받기 배너 재시도 대기")
+        await asyncio.sleep(4)
+        await page.mouse.move(640, 450)
+        await asyncio.sleep(1)
+        if await _try_click_happybean_banner(page, user_id, emit):
+            ss = await _happybean_screenshot(page, user_id, "bean")
+            return True, "콩받기 완료", ss
 
         emit(f"{user_id}: [happybean] 콩받기 배너 안 떴음")
         ss = await _happybean_screenshot(page, user_id, "bean")
@@ -3790,10 +3807,86 @@ async def _check_happybean_banner(page, user_id: str, emit: Callable) -> tuple[b
         return False, f"콩받기 오류: {str(e)}", ss
 
 
+async def _blog_home_click_round(page, user_id: str, emit: Callable, clicked: set) -> int:
+    """현재 페이지의 #floatingda_content 배너들을 1회 순회하며 클릭. 새로 클릭한 개수 반환."""
+    # #floatingda_content 컨테이너 대기 (최대 8초) - 배너가 늦게 뜨는 경우 대비
+    try:
+        await page.locator("#floatingda_content").wait_for(state="visible", timeout=8000)
+    except Exception:
+        pass
+
+    floating_items = page.locator("#floatingda_content > *")
+    count = await floating_items.count()
+    emit(f"{user_id}: [happybean] 블로그 홈 플로팅 배너 {count}개 발견")
+
+    new_clicked = 0
+    for i in range(count):
+        item = floating_items.nth(i)
+        try:
+            item_key = (await item.inner_text()).strip()[:120]
+        except Exception:
+            item_key = str(i)
+        if item_key in clicked:
+            emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 이미 처리됨 (스킵)")
+            continue
+
+        try:
+            # 호버하여 콩받기 버튼 노출
+            emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 호버 시작")
+            await item.hover()
+            await asyncio.sleep(0.7)
+
+            # 노출된 해피빈 링크 또는 "클릭하고 기부콩" 버튼 찾기 (다양한 셀렉터 시도)
+            bean_link = None
+            for sel_label, locator in [
+                ("link:네이버 해피빈", page.get_by_role("link", name=re.compile("네이버 해피빈")).first),
+                ("text:클릭하고 기부콩", page.get_by_text(re.compile("클릭하고 기부콩"), exact=False).first),
+                ("text:기부콩", page.get_by_text(re.compile("기부콩"), exact=False).first),
+                ("btn:기부콩", page.locator("button,a").filter(has_text=re.compile("기부콩")).first),
+                ("btn:콩 받기", page.locator("button,a").filter(has_text=re.compile("콩.{0,3}받기")).first),
+            ]:
+                cnt = await locator.count()
+                emit(f"{user_id}: [happybean] 블로그 홈 버튼 탐색 [{sel_label}] count={cnt}")
+                if cnt > 0:
+                    bean_link = locator
+                    emit(f"{user_id}: [happybean] 블로그 홈 버튼 발견 [{sel_label}]")
+                    break
+
+            if bean_link is None:
+                emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 콩받기 버튼 없음")
+                clicked.add(item_key)
+                continue
+
+            # 팝업 열리는 경우와 아닌 경우 모두 처리
+            try:
+                async with page.expect_popup(timeout=5000) as popup_info:
+                    await bean_link.click()
+                popup = await popup_info.value
+                await popup.wait_for_load_state("domcontentloaded", timeout=10000)
+                await asyncio.sleep(1)
+                await popup.close()
+                emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 팝업 클릭 완료")
+            except Exception:
+                # 팝업 없이 바로 처리되는 경우
+                await bean_link.click(force=True)
+                await asyncio.sleep(1)
+                emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 직접 클릭 완료")
+
+            clicked.add(item_key)
+            new_clicked += 1
+            emit(f"{user_id}: [happybean] 블로그 홈 배너 클릭 완료")
+            await asyncio.sleep(1)
+        except Exception as e:
+            clicked.add(item_key)
+            emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 클릭 실패: {e}")
+
+    return new_clicked
+
+
 async def _collect_blog_home_beans(page, user_id: str, emit: Callable) -> tuple[bool, str, str]:
     """블로그 홈 해피빈 배너 콩받기.
     플로팅 아이콘에 호버 → '클릭하고 기부콩' 버튼 노출 → 팝업 클릭 → 닫기.
-    새 배너가 없을 때까지 새로고침하며 반복.
+    새 배너가 없을 때까지 새로고침하며 반복. 배너가 늦게 뜨는 경우를 대비해 마지막에 한 번 더 재시도한다.
     """
     try:
         emit(f"{user_id}: [happybean] 블로그 홈 콩받기 시작")
@@ -3808,78 +3901,25 @@ async def _collect_blog_home_beans(page, user_id: str, emit: Callable) -> tuple[
         collected = 0
 
         for _ in range(15):
-            # #floatingda_content 안의 플로팅 배너 아이콘들
-            floating_items = page.locator("#floatingda_content > *")
-            count = await floating_items.count()
-            emit(f"{user_id}: [happybean] 블로그 홈 플로팅 배너 {count}개 발견")
-
-            new_clicked = False
-            for i in range(count):
-                item = floating_items.nth(i)
-                try:
-                    item_key = (await item.inner_text()).strip()[:120]
-                except Exception:
-                    item_key = str(i)
-                if item_key in clicked:
-                    emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 이미 처리됨 (스킵)")
-                    continue
-
-                try:
-                    # 호버하여 콩받기 버튼 노출
-                    emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 호버 시작")
-                    await item.hover()
-                    await asyncio.sleep(0.7)
-
-                    # 노출된 해피빈 링크 또는 "클릭하고 기부콩" 버튼 찾기 (다양한 셀렉터 시도)
-                    bean_link = None
-                    for sel_label, locator in [
-                        ("link:네이버 해피빈", page.get_by_role("link", name=re.compile("네이버 해피빈")).first),
-                        ("text:클릭하고 기부콩", page.get_by_text(re.compile("클릭하고 기부콩"), exact=False).first),
-                        ("text:기부콩", page.get_by_text(re.compile("기부콩"), exact=False).first),
-                        ("btn:기부콩", page.locator("button,a").filter(has_text=re.compile("기부콩")).first),
-                        ("btn:콩 받기", page.locator("button,a").filter(has_text=re.compile("콩.{0,3}받기")).first),
-                    ]:
-                        cnt = await locator.count()
-                        emit(f"{user_id}: [happybean] 블로그 홈 버튼 탐색 [{sel_label}] count={cnt}")
-                        if cnt > 0:
-                            bean_link = locator
-                            emit(f"{user_id}: [happybean] 블로그 홈 버튼 발견 [{sel_label}]")
-                            break
-
-                    if bean_link is None:
-                        emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 콩받기 버튼 없음")
-                        clicked.add(item_key)
-                        continue
-
-                    # 팝업 열리는 경우와 아닌 경우 모두 처리
-                    try:
-                        async with page.expect_popup(timeout=5000) as popup_info:
-                            await bean_link.click()
-                        popup = await popup_info.value
-                        await popup.wait_for_load_state("domcontentloaded", timeout=10000)
-                        await asyncio.sleep(1)
-                        await popup.close()
-                        emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 팝업 클릭 완료")
-                    except Exception:
-                        # 팝업 없이 바로 처리되는 경우
-                        await bean_link.click(force=True)
-                        await asyncio.sleep(1)
-                        emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 직접 클릭 완료")
-
-                    clicked.add(item_key)
-                    collected += 1
-                    new_clicked = True
-                    emit(f"{user_id}: [happybean] 블로그 홈 배너 클릭 완료 ({collected}개 누적)")
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    clicked.add(item_key)
-                    emit(f"{user_id}: [happybean] 블로그 홈 배너[{i}] 클릭 실패: {e}")
-
+            new_clicked = await _blog_home_click_round(page, user_id, emit, clicked)
+            collected += new_clicked
             if not new_clicked:
                 break
 
             await page.reload(wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2000)
+            await page.mouse.move(640, 450)
+            await asyncio.sleep(1)
+
+        if collected == 0:
+            # 배너가 늦게 뜨는 경우를 위해 마지막에 한 번 더 시도
+            emit(f"{user_id}: [happybean] 블로그 홈 콩받기 재시도 대기")
+            await asyncio.sleep(4)
+            await page.reload(wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(2000)
+            await page.mouse.move(640, 450)
+            await asyncio.sleep(1)
+            collected += await _blog_home_click_round(page, user_id, emit, clicked)
 
         ss = await _happybean_screenshot(page, user_id, "blog_home")
         if collected > 0:

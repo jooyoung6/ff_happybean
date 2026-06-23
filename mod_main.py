@@ -237,11 +237,6 @@ class ModuleMain(PluginModuleBase):
         finally:
             self._mark_collection_finished()
 
-        # 9시 실행 완료 후 콩받기 자동 시작
-        if time.localtime().tm_hour == 9:
-            P.logger.info("[NaverPaper] 9시 실행 완료 → 해피빈 콩받기 자동 시작")
-            self._start_happybean_run_background()
-
     def _start_run_now_background(self):
         warning = self._source_dependency_warning()
         if warning:
