@@ -50,6 +50,8 @@ HAPPYBEAN_POST_TITLE = "콩"
 HAPPYBEAN_POST_CONTENT = "콩"
 BLOG_HOME_URL = "https://section.blog.naver.com/BlogHome.naver?directoryNo=0&currentPage=1&groupId=0"
 
+ACCOUNT_RUN_TIMEOUT = 600  # 계정 1개 처리 최대 대기 시간(초). 초과 시 다음 계정으로 넘어간다.
+
 LOGIN_SESSION_TTL = 300
 _login_sessions = {}
 _login_sessions_lock = threading.Lock()
@@ -353,6 +355,10 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
         history = RunHistory(started_at=result.started_at, status="running", account_count=result.account_count)
         session_db.add(history)
         session_db.flush()
+        # 아래 작업이 길어지더라도 다른 스케줄(콩받기 등)이 같은 sqlite 파일에
+        # 쓰기를 못 해 "database is locked"가 나지 않도록, 쓰기 직후 바로 커밋해
+        # 트랜잭션을 오래 들고 있지 않는다. 이 row가 즉시 보이면 이력에도 누락되지 않는다.
+        session_db.commit()
 
         try:
             emit("Campaign URL collection started")
@@ -365,6 +371,7 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
                 config.cookie_dir,
                 config.login_proxy_url,
             )
+            session_db.commit()
             result.collected_url_count = len(collected_urls)
             emit(f"Campaign URL collection finished: {result.collected_url_count}")
             excluded_reward_sources = load_excluded_reward_sources(session_db)
@@ -374,16 +381,27 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
             for account in config.accounts:
                 account_candidate_urls = set(collected_urls)
                 account_candidate_urls.update(account_collected_urls.get(account.user_id, set()))
-                account_result = await process_account(
-                    account,
-                    session_db,
-                    config.cookie_dir,
-                    config.reward_proxy_url,
-                    emit,
-                    config.login_proxy_url,
-                    account_candidate_urls,
-                    excluded_reward_sources,
-                )
+                try:
+                    account_result = await asyncio.wait_for(
+                        process_account(
+                            account,
+                            session_db,
+                            config.cookie_dir,
+                            config.reward_proxy_url,
+                            emit,
+                            config.login_proxy_url,
+                            account_candidate_urls,
+                            excluded_reward_sources,
+                        ),
+                        timeout=ACCOUNT_RUN_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    emit(f"{account.user_id}: 처리 시간 초과({ACCOUNT_RUN_TIMEOUT}s) - 다음 계정으로 넘어감")
+                    session_db.rollback()
+                    account_result = AccountResult(
+                        user_id=account.user_id,
+                        details=[DetailResult(user_id=account.user_id, status="timeout", message="처리 시간 초과")],
+                    )
                 result.account_results.append(account_result)
                 result.estimated_points += account_result.estimated_points
                 result.skipped_url_count += account_result.skipped_url_count
@@ -421,6 +439,7 @@ async def run(config: RunConfig, log: Optional[Callable[[str], None]] = None) ->
                             message="No unvisited campaign URL",
                         )
                     )
+                session_db.commit()
 
             delete_old_stuff(session_db, config.keep_campaign_days, config.keep_user_days, emit)
             result.status = "completed"
@@ -4434,8 +4453,16 @@ async def run_happybean_for_account(
             emit(f"{account.user_id}: [happybean] 블로그 홈 {bh_msg}")
 
         finally:
-            await context.close()
-            await browser.close()
+            # close()가 멈춘 브라우저를 기다리며 무한정 걸리는 경우를 막기 위해
+            # 정리 작업 자체에도 짧은 시간제한을 둔다(상위 wait_for 취소 이후라도 안전하게).
+            try:
+                await asyncio.wait_for(context.close(), timeout=15)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(browser.close(), timeout=15)
+            except Exception:
+                pass
 
     return details
 
@@ -4458,18 +4485,31 @@ async def run_happybean(config: RunConfig, log: Optional[Callable] = None) -> Ha
         )
         session_db.add(history)
         session_db.flush()
+        # 카페/블로그 글쓰기는 수 분이 걸리고 가끔 멈출 수 있다. 트랜잭션을 오래
+        # 들고 있으면 같은 시각 다른 스케줄(포인트받기)의 sqlite 쓰기가
+        # "database is locked"로 실패하고, 이 run도 끝까지 못 가면 이력에 아예
+        # 안 남는다. 그래서 row 생성 직후 바로 커밋해 둔다.
+        session_db.commit()
 
         try:
             emit("[happybean] 카페/블로그 글쓰기 시작")
             for account in config.accounts:
-                account_details = await run_happybean_for_account(
-                    account,
-                    session_db,
-                    config.cookie_dir,
-                    emit,
-                    config.login_proxy_url,
-                    headless=not config.debug_no_headless,
-                )
+                try:
+                    account_details = await asyncio.wait_for(
+                        run_happybean_for_account(
+                            account,
+                            session_db,
+                            config.cookie_dir,
+                            emit,
+                            config.login_proxy_url,
+                            headless=not config.debug_no_headless,
+                        ),
+                        timeout=ACCOUNT_RUN_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    emit(f"{account.user_id}: [happybean] 처리 시간 초과({ACCOUNT_RUN_TIMEOUT}s) - 다음 계정으로 넘어감")
+                    session_db.rollback()
+                    account_details = [HappybeanDetailResult(user_id=account.user_id, action="all", status="error", message="처리 시간 초과")]
                 result.details.extend(account_details)
                 for detail in account_details:
                     session_db.add(HappybeanDetail(
@@ -4480,6 +4520,7 @@ async def run_happybean(config: RunConfig, log: Optional[Callable] = None) -> Ha
                         message=detail.message,
                         screenshot_path=detail.screenshot_path,
                     ))
+                session_db.commit()
             # 전체 성공 여부: 카페/블로그 모두 콩받기 성공한 경우만 "success"
             cafe_details = [d for d in result.details if d.action == "cafe"]
             blog_details = [d for d in result.details if d.action == "blog"]
